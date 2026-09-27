@@ -76,3 +76,20 @@ target_link_libraries(WeReadStoreTest PRIVATE
 )
 
 gtest_discover_tests(WeReadStoreTest PROPERTIES RUN_SERIAL TRUE)
+
+add_executable(WeReadTimeLedgerTest
+  WeReadTimeLedgerTest.cpp
+  ${REPO_ROOT}/lib/WeReadWebApi/src/WeReadTimeLedger.cpp
+  ${crosspoint_simulator_SOURCE_DIR}/src/HalStorage.cpp
+)
+target_include_directories(WeReadTimeLedgerTest BEFORE PRIVATE
+  ${crosspoint_simulator_SOURCE_DIR}/src
+  ${REPO_ROOT}/lib/WeReadWebApi/src
+)
+target_compile_definitions(WeReadTimeLedgerTest PRIVATE CROSSPOINT_EMULATED=1 DESTRUCTOR_CLOSES_FILE=1)
+target_link_libraries(WeReadTimeLedgerTest PRIVATE crosspoint_test_common GTest::gtest_main)
+gtest_discover_tests(WeReadTimeLedgerTest PROPERTIES RUN_SERIAL TRUE)
+
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_test(NAME WeReadTimePayloadAndRetry
+  COMMAND ${Python3_EXECUTABLE} ${REPO_ROOT}/scripts/tests/test_weread_time_sync.py)

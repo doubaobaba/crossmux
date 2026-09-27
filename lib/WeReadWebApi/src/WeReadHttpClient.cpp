@@ -244,7 +244,10 @@ WeReadHttpClient::Result runRequest(const char* url, const WeReadHttpClient::Req
           static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMaxAllocHeap()),
           static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
 
-  client.setInsecure();
+  if (options.rootCA)
+    client.setCACert(options.rootCA);
+  else
+    client.setInsecure();
   client.setTimeout(static_cast<unsigned long>(options.timeoutMs));
   if (!reused && !client.connect(host, HTTPS_PORT)) {
     LOG_ERR("HTTP", "wolfSSL request connect failed");
@@ -469,7 +472,8 @@ WeReadHttpClient::Result runRequest(const char* url, const WeReadHttpClient::Req
     config.buffer_size = HTTP_RX_BUF;
     config.buffer_size_tx = HTTP_TX_BUF;
     config.timeout_ms = options.timeoutMs;
-    config.crt_bundle_attach = esp_crt_bundle_attach;
+    config.cert_pem = options.rootCA;
+    config.crt_bundle_attach = options.rootCA ? nullptr : esp_crt_bundle_attach;
     config.method = method;
     config.keep_alive_enable = false;
     config.event_handler = onRequestEvent;
@@ -636,6 +640,10 @@ Result request(Session& session, const char* url, const RequestOptions& options,
     status = -1;
     LOG_INF("HTTP", "Request skipped: Wi-Fi not ready");
     return Result::NetworkError;
+  }
+  if (session.rootCA_ != options.rootCA) {
+    session.reset();  // Never reuse an unverified connection for a verified request.
+    session.rootCA_ = options.rootCA;
   }
   LOG_DBG("HTTP", "%s %s", options.method ? options.method : "?", url ? url : "?");
   return runRequest(url, options, onData, onHeader, status, session.client_, session.host_, sizeof(session.host_),

@@ -45,6 +45,10 @@ class Activity {
   // Request an immediate render and block until it completes.
   virtual void requestUpdateAndWait();
 
+  // Called only at stack transitions; covered readers must stop timing.
+  virtual void onCovered() {}
+  virtual void onRevealed() {}
+
   virtual bool skipLoopDelay() { return false; }
   virtual bool preventAutoSleep() { return false; }
   // Exclusive storage activities suspend global controls and normal activity

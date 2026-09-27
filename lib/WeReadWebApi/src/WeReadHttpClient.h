@@ -33,6 +33,7 @@ struct RequestOptions {
   const Header* headers = nullptr;
   size_t headerCount = 0;
   int timeoutMs = 60000;
+  const char* rootCA = nullptr;  // Optional verified trust root; native time sync requires it.
   uint8_t* readBuffer = nullptr;
   size_t readBufferSize = 0;
 };
@@ -65,6 +66,7 @@ class Session {
   esp_http_client_handle_t client_ = nullptr;
 #endif
   char host_[128] = {};
+  const char* rootCA_ = nullptr;
   uint32_t newConnections_ = 0;
   uint32_t reusedRequests_ = 0;
 };

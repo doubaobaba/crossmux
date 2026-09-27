@@ -44,6 +44,7 @@
 #include "ReadingStatsStore.h"
 #include "RecentBooksStore.h"
 #include "SdCardFontSystem.h"
+#include "WeReadReadingTime.h"
 #include "activities/settings/TextSettingsActivity.h"
 #include "util/BookCacheUtils.h"
 #include "util/BookmarkFile.h"
@@ -269,7 +270,22 @@ EpubReaderActivity::~EpubReaderActivity() {
   }
 }
 
+void EpubReaderActivity::onCovered() {
+#ifdef ENABLE_CHINESE_VERSION
+  WEREAD_TIME.pause();
+#endif
+}
+
+void EpubReaderActivity::onRevealed() {
+#ifdef ENABLE_CHINESE_VERSION
+  WEREAD_TIME.resume();
+#endif
+}
+
 void EpubReaderActivity::onExit() {
+#ifdef ENABLE_CHINESE_VERSION
+  WEREAD_TIME.end();
+#endif
   if (footnoteDepth > 0 && epub) {
     const SavedPosition& origin = savedPositions[0];
     saveProgress(origin.spineIndex, origin.pageNumber, 0);
@@ -398,6 +414,9 @@ bool EpubReaderActivity::loadBook() {
       clampPercent(static_cast<int>(epub->calculateProgress(currentSpineIndex, 0.0f) * 100.0f + 0.5f)),
       getStatsChapterTitle(*epub, currentSpineIndex), 0);
 
+#ifdef ENABLE_CHINESE_VERSION
+  WEREAD_TIME.begin(wereadBookId_);
+#endif
   loadCachedBookmarks();
   return true;
 }
@@ -599,6 +618,9 @@ void EpubReaderActivity::loop() {
 #endif
 
   READING_STATS.tickActiveSession();
+#ifdef ENABLE_CHINESE_VERSION
+  WEREAD_TIME.tick(overlay == Overlay::None && section && !section->isBuilding() && !endOfBookMenuActive());
+#endif
   // Someone else turned the screen while this reader was stacked (the control
   // center's orientation tile). Reflow before the next render, or the page
   // would be drawn with a layout built for the previous frame size.
@@ -1355,6 +1377,9 @@ void EpubReaderActivity::toggleAutoPageTurn(const uint8_t requestedPageTurnRate)
 bool EpubReaderActivity::pageTurn(bool isForwardTurn) {
   if (!section) return false;
   READING_STATS.noteActivity();
+#ifdef ENABLE_CHINESE_VERSION
+  if (!automaticPageTurnActive) WEREAD_TIME.interact();
+#endif
   {
     RenderLock lock;
     clearDeferredReposition();
@@ -1397,6 +1422,9 @@ bool EpubReaderActivity::pageTurn(bool isForwardTurn) {
 bool EpubReaderActivity::skipPages(int amount) {
   if (!section) return false;
   READING_STATS.noteActivity();
+#ifdef ENABLE_CHINESE_VERSION
+  if (!automaticPageTurnActive) WEREAD_TIME.interact();
+#endif
   if (amount > 0) {
     RenderLock lock;
     nextPageNumber = 0;

@@ -711,3 +711,41 @@ initialized the display and physically rendered its startup verification page.
 Only after confirmation cancels rollback may the old firmware slot be erased
 and rebuilt as a font cache. If that copy is interrupted or fails, the
 uncommitted header remains invalid and the selected font loads from SD.
+
+## Experimental WeRead reading-time ledger (WRTM v2)
+
+Test2 uses `/.crosspoint/weread-time-v2/<account-vid>/<bookId>.0` and `.1`.
+Two 684-byte slots, separate from editable statistics and disposable cache.
+IDs are 1-63 ASCII alphanumeric/underscore; public-account books are excluded.
+No credentials in ledger files. All integers are explicitly little-endian.
+
+| Offset | Bytes | Field |
+|---|---:|---|
+| 0 | 4 | ASCII `WRTM` |
+| 4 | 4 | Version 2, three zero reserved bytes |
+| 8 | 8 | Monotonic sequence, initially 1 |
+| 16 | 8 | Acknowledged and book-counter-verified seconds |
+| 24 | 8 | Uncertain seconds excluded from retry |
+| 32 | 8 | Milliseconds with unknown time or outside queue capacity |
+| 40 | 512 | 64 pending buckets: uint32 UTC hour start, uint32 milliseconds |
+| 552 | 128 | 16 in-flight buckets: uint32 UTC hour start, uint32 seconds |
+| 680 | 4 | FNV-1a-32 over bytes 0-679 |
+
+Hour start is divisible by 3600 and no earlier than 2021; pending amount <=
+3,600,000 ms and in-flight amount <= 3600 s. Empty buckets have zero amounts.
+Commits alternate slots by sequence & 1, flush/close and verify exact bytes.
+Opening selects the newest valid slot; invalid existing slots fail closed unless
+the valid record already has an in-flight batch that can be quarantined. Never
+fall back from a damaged reservation to older pending time and resend it.
+Reserve before POST; only explicit acknowledgement plus observed book-time
+increase commits accepted time. Uncertain responses and rebooted in-flight
+batches move to quarantine. Fractional seconds remain pending in each hour.
+Subsecond-only slots may be reclaimed when full, moving their milliseconds
+to the unreported counter so future hours are not blocked.
+Checkpoints are every 60 seconds and cover/exit. Corrupt SD or uncheckpointed
+power loss cannot guarantee recovery; unknown time is never assigned a guessed
+date. No migration from withdrawn WRTM v1 (which lacked dates) or local totals.
+
+The experimental native login import is a separate private JSON file at
+`/.crosspoint/weread/native-session.json`. Never distribute it with firmware.
+See [test implementation notes](engineering/weread-time-sync-test.md).

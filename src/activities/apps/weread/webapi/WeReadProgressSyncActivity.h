@@ -1,5 +1,7 @@
 #pragma once
 
+#include <WeReadTimeLedger.h>
+
 #include <atomic>
 #include <cstdint>
 #include <string>
@@ -31,6 +33,9 @@ class WeReadProgressSyncActivity final : public Activity {
     Starting,
     Syncing,
     ChoosingDirection,
+    TimeStarting,
+    TimeSyncing,
+    TimeFailed,
     Success,
     Failed,
     LoginRequired,
@@ -43,6 +48,9 @@ class WeReadProgressSyncActivity final : public Activity {
 
   State state_ = State::WifiSelection;
   WeReadClient::Operation operation_;
+  WeReadTimeLedger timeLedger_;
+  uint64_t acceptedAtStart_ = 0;
+  bool timeReady_ = false;
   WeReadClient::Error error_ = WeReadClient::Error::Ok;
   WeReadClient::ProgressSyncMode syncMode_ = WeReadClient::ProgressSyncMode::Compare;
   WeReadClient::ProgressSyncOutcome outcome_ = WeReadClient::ProgressSyncOutcome::Pending;
@@ -56,6 +64,7 @@ class WeReadProgressSyncActivity final : public Activity {
   float remoteFraction_ = 0.0f;
   bool uploadConflict_ = false;
   bool wifiActivated_ = false;
+  bool radioStopped_ = false;
   std::atomic<bool> fullRefreshPending_{true};
 
   void launchWifiSelection();
@@ -63,6 +72,7 @@ class WeReadProgressSyncActivity final : public Activity {
   void startSync();
   void advanceSync();
   void beginSelectedDirection();
+  void startTimeSync();
   void applyRemoteProgress(const WeReadProtocol::RemoteProgress& remote);
   void returnToReader();
   const char* resultMessage() const;

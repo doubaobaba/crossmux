@@ -24,6 +24,7 @@
 #include "ProgressMapper.h"
 #include "ReadingStatsStore.h"
 #include "SilentRestart.h"
+#include "WeReadReadingTime.h"
 #include "WeReadXhtmlCodec.h"
 #include "activities/ActivityManager.h"
 #include "activities/network/WifiSelectionActivity.h"
@@ -88,6 +89,8 @@ void WeReadProgressSyncActivity::onEnter() {
 
   WeReadStore::Session session;
   const bool loggedIn = WeReadStore::loadSession(session) && session.valid();
+  timeReady_ = loggedIn && !WEREAD_TIME.storageFailed() && timeLedger_.open(session.vid, bookId_);
+  acceptedAtStart_ = timeLedger_.acceptedSeconds();
   session.clear();
   if (!loggedIn) {
     state_ = State::LoginRequired;
@@ -114,7 +117,10 @@ void WeReadProgressSyncActivity::onExit() {
   silentRestartToReader();
 }
 
-bool WeReadProgressSyncActivity::preventAutoSleep() { return state_ == State::Starting || state_ == State::Syncing; }
+bool WeReadProgressSyncActivity::preventAutoSleep() {
+  return state_ == State::Starting || state_ == State::Syncing || state_ == State::TimeStarting ||
+         state_ == State::TimeSyncing;
+}
 
 void WeReadProgressSyncActivity::launchWifiSelection() {
   state_ = State::WifiSelection;
@@ -142,6 +148,12 @@ void WeReadProgressSyncActivity::onWifiSelectionComplete(const bool connected) {
 }
 
 void WeReadProgressSyncActivity::startSync() {
+  if (radioStopped_) {
+    radioStopped_ = false;
+    NetworkStartup::prepare(renderer);
+    launchWifiSelection();
+    return;
+  }
   requestUpdateAndWait();
   if (!TimeUtils::isClockValid() && !halClock.syncNow()) {
     LOG_ERR("WRSync", "Clock sync failed");
@@ -157,6 +169,21 @@ void WeReadProgressSyncActivity::startSync() {
     return;
   }
   state_ = State::Syncing;
+  requestUpdate();
+}
+
+void WeReadProgressSyncActivity::startTimeSync() {
+  if (!timeReady_ || !timeLedger_.healthy()) {
+    error_ = WeReadClient::Error::SdCard;
+    state_ = State::TimeFailed;
+  } else if (timeLedger_.pendingSeconds() == 0) {
+    state_ = State::Success;
+  } else if (operation_.beginReadingTimeSync(bookId_, timeLedger_)) {
+    state_ = State::TimeSyncing;
+  } else {
+    error_ = operation_.error();
+    state_ = State::TimeFailed;
+  }
   requestUpdate();
 }
 
@@ -178,11 +205,21 @@ void WeReadProgressSyncActivity::advanceSync() {
       return;
     case WeReadClient::Operation::Event::Failed:
       error_ = operation_.error();
-      state_ = error_ == WeReadClient::Error::SessionExpired ? State::LoginRequired : State::Failed;
+      state_ = state_ == State::TimeSyncing
+                   ? State::TimeFailed
+                   : (error_ == WeReadClient::Error::SessionExpired ? State::LoginRequired : State::Failed);
+      operation_.reset();
       requestUpdate();
       return;
     case WeReadClient::Operation::Event::Complete:
       break;
+  }
+
+  if (state_ == State::TimeSyncing) {
+    operation_.reset();
+    state_ = timeLedger_.pendingSeconds() ? State::TimeStarting : State::Success;
+    requestUpdate();
+    return;
   }
 
   const auto result = operation_.progressSyncResult();
@@ -200,9 +237,10 @@ void WeReadProgressSyncActivity::advanceSync() {
   }
   if (outcome_ == WeReadClient::ProgressSyncOutcome::ApplyRemote) {
     applyRemoteProgress(result.remote);
+    if (state_ == State::Success) state_ = State::TimeStarting;
     return;
   }
-  state_ = State::Success;
+  state_ = State::TimeStarting;
   requestUpdate();
 }
 
@@ -337,7 +375,7 @@ const char* WeReadProgressSyncActivity::errorMessage() const {
     case WeReadClient::Error::Clock:
       return tr(STR_CLOCK_SYNC_FAIL);
     case WeReadClient::Error::SessionExpired:
-      return tr(STR_WEREAD_LOGIN_REQUIRED);
+      return state_ == State::TimeFailed ? tr(STR_WEREAD_NATIVE_LOGIN_REQUIRED) : tr(STR_WEREAD_LOGIN_REQUIRED);
     case WeReadClient::Error::Ok:
     case WeReadClient::Error::Cancelled:
     case WeReadClient::Error::LoginFailed:
@@ -350,12 +388,27 @@ const char* WeReadProgressSyncActivity::errorMessage() const {
 }
 
 void WeReadProgressSyncActivity::loop() {
+  if (!radioStopped_ && wifiActivated_ &&
+      (state_ == State::Success || state_ == State::TimeFailed || state_ == State::Failed ||
+       state_ == State::LoginRequired)) {
+    operation_.reset();
+    WiFi.disconnect(true);
+    radioStopped_ = true;
+  }
   switch (state_) {
     case State::WifiSelection:
       return;
     case State::Starting:
       startSync();
       return;
+    case State::TimeStarting:
+      if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+        returnToReader();
+        return;
+      }
+      startTimeSync();
+      return;
+    case State::TimeSyncing:
     case State::Syncing:
       if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
         operation_.cancel();
@@ -406,6 +459,16 @@ void WeReadProgressSyncActivity::loop() {
       }
       return;
     }
+    case State::TimeFailed:
+      if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+        returnToReader();
+      } else if (mappedInput.wasReleased(MappedInputManager::Button::Confirm) && timeReady_ && timeLedger_.healthy() &&
+                 timeLedger_.pendingSeconds() && error_ != WeReadClient::Error::SessionExpired) {
+        operation_.reset();
+        state_ = State::Starting;
+        requestUpdate();
+      }
+      return;
     case State::Failed:
       if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
         returnToReader();
@@ -479,10 +542,34 @@ void WeReadProgressSyncActivity::render(RenderLock&&) {
       }
       break;
     }
-    case State::Success:
-      UITheme::drawCenteredText(renderer, textBounds, UI_12_FONT_ID, SubpageLayout::centeredTop(content, titleHeight),
-                                resultMessage(), true, EpdFontFamily::BOLD);
+    case State::TimeStarting:
+    case State::TimeSyncing:
+    case State::TimeFailed:
+    case State::Success: {
+      const int line = renderer.getLineHeight(UI_10_FONT_ID);
+      const int top = SubpageLayout::centeredTop(content, line * 9);
+      const char* title = state_ == State::Success ? resultMessage()
+                                                   : (state_ == State::TimeFailed ? tr(STR_WEREAD_TIME_STOPPED)
+                                                                                  : tr(STR_WEREAD_TIME_SENDING));
+      UITheme::drawCenteredText(renderer, textBounds, UI_10_FONT_ID, top, title, true, EpdFontFamily::BOLD);
+      char value[96];
+      snprintf(value, sizeof(value), tr(STR_WEREAD_TIME_SENT_FORMAT),
+               static_cast<unsigned long long>(timeLedger_.acceptedSeconds() - acceptedAtStart_));
+      UITheme::drawCenteredText(renderer, textBounds, UI_10_FONT_ID, top + line * 2, value);
+      snprintf(value, sizeof(value), tr(STR_WEREAD_TIME_PENDING_FORMAT),
+               static_cast<unsigned long long>(timeLedger_.pendingSeconds()));
+      UITheme::drawCenteredText(renderer, textBounds, UI_10_FONT_ID, top + line * 3, value);
+      snprintf(value, sizeof(value), tr(STR_WEREAD_TIME_UNCERTAIN_FORMAT),
+               static_cast<unsigned long long>(timeLedger_.uncertainSeconds()));
+      UITheme::drawCenteredText(renderer, textBounds, UI_10_FONT_ID, top + line * 4, value);
+      UITheme::drawCenteredText(renderer, textBounds, UI_10_FONT_ID, top + line * 6,
+                                state_ == State::TimeFailed ? errorMessage() : tr(STR_WEREAD_TIME_CHECK_APP));
+      UITheme::drawCenteredText(renderer, textBounds, UI_10_FONT_ID, top + line * 8,
+                                state_ == State::TimeSyncing || state_ == State::TimeStarting
+                                    ? tr(STR_WEREAD_TIME_PAUSE_HINT)
+                                    : tr(STR_WEREAD_TIME_UNCERTAIN_HINT));
       break;
+    }
     case State::LoginRequired:
       UITheme::drawCenteredWrappedText(renderer, textBounds, UI_10_FONT_ID, tr(STR_WEREAD_LOGIN_REQUIRED), 2, true,
                                        EpdFontFamily::BOLD);
@@ -495,6 +582,14 @@ void WeReadProgressSyncActivity::render(RenderLock&&) {
 
   if (state_ == State::ChoosingDirection) {
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
+    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+  } else if (state_ == State::TimeStarting || state_ == State::TimeSyncing) {
+    const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
+    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+  } else if (state_ == State::TimeFailed) {
+    const bool retryable = timeReady_ && timeLedger_.healthy() && timeLedger_.pendingSeconds() &&
+                           error_ != WeReadClient::Error::SessionExpired;
+    const auto labels = mappedInput.mapLabels(tr(STR_BACK), retryable ? tr(STR_RETRY) : "", "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   } else if (state_ == State::Success || state_ == State::LoginRequired || state_ == State::Failed) {
     const bool retryable =

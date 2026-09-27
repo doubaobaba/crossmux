@@ -7,8 +7,11 @@
 
 #include "WeReadBrowse.h"
 #include "WeReadHttpClient.h"
+#include "WeReadNativeTime.h"
 #include "WeReadProtocol.h"
 #include "WeReadStore.h"
+
+class WeReadTimeLedger;
 
 namespace WeReadClient {
 
@@ -92,6 +95,7 @@ class Operation {
   bool begin(Kind kind, const WeReadStore::ShelfRecord* book = nullptr, DownloadOptions options = {},
              ShelfCoverScope shelfCoverScope = ShelfCoverScope::None);
   bool beginProgressSync(const char* bookId, ProgressSyncInput input, ProgressSyncMode mode);
+  bool beginReadingTimeSync(const char* bookId, WeReadTimeLedger& ledger);
   bool beginBrowseCache(const WeReadStore::BookRecord& book);
   Event step(WeReadStore::WorkCallback callback = nullptr, void* callbackContext = nullptr);
   void cancel();
@@ -174,6 +178,7 @@ class Operation {
     SendProgressEnter,
     SendProgressReport,
     VerifyProgress,
+    SyncNativeTime,
     OpenToc,
     AwaitChapterRange,
     LoadChapter,
@@ -372,6 +377,8 @@ class Operation {
   Error error_ = Error::Ok;
   ProgressStage progressStage_ = ProgressStage::Chapters;
   DownloadOptions options_;
+  std::unique_ptr<WeReadNativeTime::Upload> nativeTime_;
+  WeReadTimeLedger* timeLedger_ = nullptr;  // Borrowed from the sync activity until reset().
   ProgressSyncInput progressSyncInput_;
   ProgressSyncMode progressSyncMode_ = ProgressSyncMode::Compare;
   ProgressSyncResult progressSyncResult_;

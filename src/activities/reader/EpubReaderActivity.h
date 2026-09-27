@@ -216,6 +216,8 @@ class EpubReaderActivity final : public ReaderActivity {
   ~EpubReaderActivity() override;
 
   void onExit() override;
+  void onCovered() override;
+  void onRevealed() override;
   void loop() override;
 
   bool pageTurn(bool isForward) override;

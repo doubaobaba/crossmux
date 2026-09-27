@@ -149,16 +149,19 @@ offset to the `WRT2` word count; the inverse mapping restores a remote offset
 through the reader's existing pagination LUT. Older generated books without
 anchors retain the visible-offset approximation, and other EPUBs fall back to
 the whole-book percentage derived from `WRT2` word counts. Different canonical
-positions show the direction selector. A local upload uses an enter/report pair
-and includes the whole seconds recorded by the local reading session that ended
-when manual sync was opened. When the remote position is selected, its exact
-chapter and offset are reported before being applied locally, so reporting time
-cannot move cloud progress backwards. Upload is accepted only after a read-back
-verifies the chapter and offset. A timed report is not automatically repeated
-after an ambiguous network failure; the current sync screen retains it for an
-explicit Retry, but no pending time is persisted after leaving the screen. An
-expired session directs the user back to **Apps → WeRead** to sign in; it does
-not open a QR flow from the reader.
+positions show the direction selector. Progress-only upload retains its existing
+enter/report and position read-back. In the time-sync test build, successful
+position sync is followed by a separate duration stage, including equal-position
+and apply-remote outcomes. The native endpoint batches up to 16 occupied hours
+without proportional waiting, using a separate account-matched native login
+import and WRTM v2 ledger. It preserves freshly fetched cloud position, reserves
+before POST, and verifies book time after explicit acknowledgement. Ambiguous
+results are never replayed; remaining unattempted time can be retried. Wi-Fi is
+turned off on results. No historical totals are imported. A real desktop
+300-second sample was credited; X3 runtime, battery, larger backlogs and cross-day
+server attribution still require testing. See
+[the test implementation notes](weread-time-sync-test.md). Native login import
+must be renewed separately when expired; ordinary Web login still uses Apps.
 
 For a new standard-book cache, the downloader fetches cloud progress after the
 `WRT2` catalog and before any chapter or image. This request is best effort:

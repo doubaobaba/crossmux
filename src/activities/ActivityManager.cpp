@@ -186,6 +186,7 @@ void ActivityManager::loop() {
         currentActivity = std::move(stackActivities.back());
         stackActivities.pop_back();
         LOG_DBG("ACT", "Popped from activity stack, new size = %zu", stackActivities.size());
+        currentActivity->onRevealed();
         // Handle result if necessary
         if (currentActivity->resultHandler) {
           LOG_DBG("ACT", "Handling result for popped activity");
@@ -221,6 +222,7 @@ void ActivityManager::loop() {
         }
       } else if (pendingAction.load() == PendingAction::Push) {
         // Move current activity to stack
+        if (currentActivity) currentActivity->onCovered();
         stackActivities.push_back(std::move(currentActivity));
         LOG_DBG("ACT", "Pushed to activity stack, new size = %zu", stackActivities.size());
       }

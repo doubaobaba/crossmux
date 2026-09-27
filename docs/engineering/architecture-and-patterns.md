@@ -168,3 +168,13 @@ OpenDyslexic and the broad Noto reader families live in the SD font catalog
 renderer.insertFont(FONT_UI_MEDIUM, ui12FontFamily);
 renderer.drawText(FONT_UI_MEDIUM, x, y, "Hello", true);
 ```
+
+### Foreground timing at activity stack transitions
+
+`ActivityManager` calls `onCovered()` before pushing the current activity and
+`onRevealed()` when restoring it, before its result callback. Default hooks do
+nothing. The EPUB reader uses them to flush/pause and resume the experimental
+WeRead reading clock, including global control-center panels with no reader
+result callback. A replacement still calls `onExit()` on every outgoing activity;
+covered readers remain paused until explicitly revealed. No background loop or
+extra task is introduced.

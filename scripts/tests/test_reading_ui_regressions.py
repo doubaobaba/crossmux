@@ -103,9 +103,14 @@ namespace ReaderUtils { void applyOrientation(Renderer&, int) {} }
 struct { int orientation=0; } SETTINGS;
 bool loggedIn=true;
 namespace WeReadStore {
-struct Session { bool valid() { return true; } void clear() {} };
+struct Session { const char* vid="123"; bool valid() { return true; } void clear() {} };
 bool loadSession(Session&) { return loggedIn; }
 }
+struct { bool storageFailed() { return false; } } WEREAD_TIME;
+struct Ledger {
+  bool open(const char*, const char*) { return true; }
+  unsigned acceptedSeconds() { return 0; }
+};
 namespace NetworkStartup { void prepare(Renderer&) {} }
 constexpr int WL_CONNECTED=1;
 struct { int connected=1; int status() { return connected; } } WiFi;
@@ -114,6 +119,10 @@ struct WeReadProgressSyncActivity : Activity {
   State state_ = State::WifiSelection;
   std::atomic<bool> fullRefreshPending_{true};
   Renderer renderer;
+  Ledger timeLedger_;
+  bool timeReady_=false;
+  unsigned acceptedAtStart_=0;
+  const char* bookId_="456";
   bool wifiActivated_=false, returned=false, child=false;
   void requestUpdate() {}
   void launchWifiSelection() { child=true; }
@@ -128,6 +137,7 @@ int main() {
     loggedIn=login; WiFi.connected=connected;
     WeReadProgressSyncActivity page;
     page.onEnter();
+    assert(page.timeReady_ == login);
     if (page.child) {
       page.renderer.displayBuffer(); // A child paint cannot consume the parent's flag.
       WiFi.connected=1;

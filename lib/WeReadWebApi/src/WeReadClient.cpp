@@ -1,5 +1,7 @@
 #include "WeReadClient.h"
 
+#include "WeReadTimeLedger.h"
+
 #ifdef ENABLE_CHINESE_VERSION
 
 #include <Arduino.h>
@@ -1873,6 +1875,7 @@ bool Operation::active() const {
     case Phase::SendProgressEnter:
     case Phase::SendProgressReport:
     case Phase::VerifyProgress:
+    case Phase::SyncNativeTime:
     case Phase::OpenToc:
     case Phase::AwaitChapterRange:
     case Phase::LoadChapter:
@@ -1915,6 +1918,9 @@ void Operation::reset() {
   error_ = Error::Ok;
   progressStage_ = ProgressStage::Chapters;
   options_ = {};
+  nativeTime_.reset();
+  if (timeLedger_) timeLedger_->quarantineBatch();
+  timeLedger_ = nullptr;
   progressSyncInput_ = {};
   progressSyncMode_ = ProgressSyncMode::Compare;
   progressSyncResult_ = {};
@@ -2092,6 +2098,33 @@ bool Operation::beginProgressSync(const char* bookId, ProgressSyncInput input, c
   }
   phase_ = Phase::PrepareProgressSync;
   logMemory("progress sync start");
+  return true;
+}
+
+bool Operation::beginReadingTimeSync(const char* bookId, WeReadTimeLedger& ledger) {
+  if (!beginProgressSync(bookId, {}, ProgressSyncMode::Compare)) return false;
+  if (!ledger.healthy() || ledger.pendingSeconds() == 0 || strcmp(session_.vid, ledger.account()) != 0) {
+    error_ = Error::SdCard;
+    phase_ = Phase::Failed;
+    return false;
+  }
+  // Native transport needs a bounded ~10 KiB workspace only during explicit sync.
+  // Heap allocation avoids growing the normal reader or the main task stack.
+  nativeTime_ = makeUniqueNoThrow<WeReadNativeTime::Upload>();
+  if (!nativeTime_) {
+    LOG_ERR("WRTime", "OOM: native upload workspace");
+    error_ = Error::OutOfMemory;
+    phase_ = Phase::Failed;
+    return false;
+  }
+  if (!nativeTime_->begin(bookId, ledger)) {
+    nativeTime_.reset();
+    error_ = Error::Unavailable;
+    phase_ = Phase::Failed;
+    return false;
+  }
+  timeLedger_ = &ledger;
+  phase_ = Phase::SyncNativeTime;
   return true;
 }
 
@@ -3891,6 +3924,16 @@ Operation::Event Operation::step(const WeReadStore::WorkCallback callback, void*
       nextActionAt_ = millis() + kNetworkRetryBaseMs;
       phase_ = Phase::VerifyProgress;
       return Event::None;
+    }
+
+    case Phase::SyncNativeTime: {
+      if (!nativeTime_ || !timeLedger_) return fail(Error::Protocol);
+      Error error = Error::Ok;
+      if (!nativeTime_->step(error)) return Event::None;
+      nativeTime_.reset();
+      if (error != Error::Ok) return fail(error);  // Never enter automatic POST retry/reauth.
+      phase_ = Phase::Complete;
+      return Event::Complete;
     }
 
     case Phase::VerifyProgress: {
