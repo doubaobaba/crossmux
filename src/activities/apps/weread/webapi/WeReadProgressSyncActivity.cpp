@@ -237,6 +237,7 @@ void WeReadProgressSyncActivity::advanceNativeLogin() {
 }
 
 void WeReadProgressSyncActivity::startTimeSync() {
+  timeDiagnostic_[0] = 0;
   if (!timeReady_ || !timeLedger_.healthy()) {
     error_ = WeReadClient::Error::SdCard;
     state_ = State::TimeFailed;
@@ -269,6 +270,8 @@ void WeReadProgressSyncActivity::advanceSync() {
       return;
     case WeReadClient::Operation::Event::Failed:
       error_ = operation_.error();
+      if (state_ == State::TimeSyncing)
+        snprintf(timeDiagnostic_, sizeof(timeDiagnostic_), "%s", operation_.nativeTimeDiagnostic());
       if (state_ == State::TimeSyncing && error_ == WeReadClient::Error::SessionExpired && !nativeRecoveryAttempted_) {
         // Upload has already quarantined any attempted batch. Re-authentication
         // can resume only unattempted hours, never replay the uncertain request.
@@ -706,7 +709,8 @@ void WeReadProgressSyncActivity::render(RenderLock&&) {
     case State::TimeFailed:
     case State::Success: {
       const int line = renderer.getLineHeight(UI_10_FONT_ID);
-      const int top = SubpageLayout::centeredTop(content, line * 9);
+      const bool showDiagnostic = state_ == State::TimeFailed && timeDiagnostic_[0];
+      const int top = SubpageLayout::centeredTop(content, line * (showDiagnostic ? 10 : 9));
       const char* title = state_ == State::Success ? resultMessage()
                                                    : (state_ == State::TimeFailed ? tr(STR_WEREAD_TIME_STOPPED)
                                                                                   : tr(STR_WEREAD_TIME_SENDING));
@@ -723,7 +727,9 @@ void WeReadProgressSyncActivity::render(RenderLock&&) {
       UITheme::drawCenteredText(renderer, textBounds, UI_10_FONT_ID, top + line * 4, value);
       UITheme::drawCenteredText(renderer, textBounds, UI_10_FONT_ID, top + line * 6,
                                 state_ == State::TimeFailed ? errorMessage() : tr(STR_WEREAD_TIME_CHECK_APP));
-      UITheme::drawCenteredText(renderer, textBounds, UI_10_FONT_ID, top + line * 8,
+      if (showDiagnostic)
+        UITheme::drawCenteredText(renderer, textBounds, UI_10_FONT_ID, top + line * 7, timeDiagnostic_);
+      UITheme::drawCenteredText(renderer, textBounds, UI_10_FONT_ID, top + line * (showDiagnostic ? 9 : 8),
                                 state_ == State::TimeSyncing || state_ == State::TimeStarting
                                     ? tr(STR_WEREAD_TIME_PAUSE_HINT)
                                     : tr(STR_WEREAD_TIME_UNCERTAIN_HINT));

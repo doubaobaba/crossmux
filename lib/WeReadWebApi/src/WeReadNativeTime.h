@@ -26,6 +26,8 @@ class Upload {
  public:
   bool begin(const char* bookId, WeReadTimeLedger& ledger);
   bool step(WeReadClient::Error& error);  // true = finished (success or failure)
+  void diagnosticCode(char* out, size_t capacity) const;
+
  private:
   enum class Phase { Load, Config, Feature, Info, Progress, Post, Verify, Done } phase_ = Phase::Load;
   WeReadHttpClient::Session session_;
@@ -40,8 +42,17 @@ class Upload {
   uint8_t io_[1024] = {};
   uint64_t before_ = 0;
   uint32_t version_ = 0;
+  WeReadHttpClient::Diagnostic diagnostic_;
+  WeReadHttpClient::Result transportResult_ = WeReadHttpClient::Result::Ok;
+  Phase failurePhase_ = Phase::Load;
+  int httpStatus_ = -1;
+  size_t received_ = 0;
+  uint32_t nextVerify_ = 0;
+  uint8_t verifyAttempts_ = 0;
+  bool parserError_ = false, postAcknowledged_ = false, verifyWaiting_ = false;
   WeReadClient::Error request(const char* path, bool post = false);
   bool loadCredentials();
   bool resolvePosition();
+  void saveDiagnostic(WeReadClient::Error error);
 };
 }  // namespace WeReadNativeTime

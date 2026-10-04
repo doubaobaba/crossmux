@@ -115,9 +115,61 @@ int main() {
 '''
         compile_run(code,[ROOT/'lib/JsonParser/StreamingJsonParser.cpp'])
 
+    def test_upload_diagnostic_reports_phase_without_credentials(self):
+        source=(LIB/'WeReadNativeTime.cpp').read_text()
+        diagnostics=source[source.index('void Upload::diagnosticCode('):source.index('static_assert(sizeof(Upload)')]
+        compile_run(r'''
+#include <cstdint>
+#include <cstddef>
+#include <cstdio>
+#include <cstring>
+#include <cassert>
+#include <string>
+#include <initializer_list>
+#define CROSSPOINT_VERSION "test-version"
+enum class Error { Ok,Network };
+namespace TimeUtils { uint32_t getCurrentValidTimestamp(){return 1700056800;} }
+namespace WeReadStore { bool root=true;bool ensureRoot(){return root;} }
+std::string saved;bool writable=true;unsigned opens=0,flushes=0;
+struct HalFile {
+ size_t write(const uint8_t* data,size_t n){saved.assign((const char*)data,n);return n;}
+ void flush(){++flushes;}
+};
+struct {
+ bool openFileForWrite(const char*,const char* path,HalFile&){
+  ++opens;assert(!strcmp(path,"/.crosspoint/weread/native-time-error.txt"));return writable;
+ }
+} Storage;
+struct Upload {
+ unsigned failurePhase_=6;
+ struct { unsigned stage=7,tlsStage=9;int tlsError=-125,firstTlsError=0;
+          uint32_t freeBefore=20000,largestBefore=8000,freeAfter=21000,largestAfter=10000; } diagnostic_;
+ int httpStatus_=200,transportResult_=1;size_t received_=1024;
+ struct { int errorCode=0;bool invalid=false,closed=false,hasReadingTime=false;uint64_t readingTime=0; } reply_;
+ bool parserError_=false,postAcknowledged_=true;uint8_t verifyAttempts_=3;uint64_t before_=1000;
+ struct Ledger { uint32_t inFlightSeconds(){return 300;} } ledger;
+ Ledger* ledger_=&ledger;
+ char body_[4096]="SECRET-REQUEST";
+ void diagnosticCode(char*,size_t)const;void saveDiagnostic(Error);
+};
+''' + diagnostics + r'''
+int main(){
+ Upload u;char code[96];u.diagnosticCode(code,sizeof(code));
+ assert(!strcmp(code,"U6 N7 T9:-125 H200 E0 V3"));
+ u.saveDiagnostic(Error::Network);assert(opens==1&&flushes==1);
+ for(const char* expected:{"upload_phase=6\n","http_status=200\n","tls_error=-125\n",
+      "post_acknowledged=1\n","verify_attempts=3\n","cloud_before=1000\n","inflight_seconds=300\n"})
+  assert(saved.find(expected)!=std::string::npos);
+ for(const char* secret:{"SECRET-REQUEST","accessToken","deviceId","vid=","https://"})
+  assert(saved.find(secret)==std::string::npos);
+ WeReadStore::root=false;u.saveDiagnostic(Error::Network);assert(opens==1);
+ WeReadStore::root=true;writable=false;u.saveDiagnostic(Error::Network);assert(opens==2&&flushes==1);
+}
+''')
+
     def test_non_idempotent_post_and_verification_failures_never_replay(self):
         source=(LIB/'WeReadNativeTime.cpp').read_text()
-        step=source[source.index('bool Upload::step('):source.index('static_assert(sizeof(Upload)')]
+        step=source[source.index('bool Upload::step('):source.index('void Upload::diagnosticCode(')]
         code=r'''
 #include <cassert>
 #include <cstdint>
@@ -125,6 +177,7 @@ int main() {
 #include <cstring>
 #include <initializer_list>
 enum class Error { Ok, Clock, SessionExpired, Protocol, Unavailable, SdCard, Network };
+uint32_t tick=0;uint32_t millis() { return tick; }
 namespace TimeUtils { uint32_t getCurrentValidTimestamp() { return 1700056800; } }
 long random(long,long) { return 20; }
 bool token(const char*) { return true; }
@@ -141,7 +194,7 @@ struct WeReadTimeLedger {
 };
 struct Upload {
  enum class Phase { Load,Config,Feature,Info,Progress,Post,Verify,Done } phase_=Phase::Post;
- struct { void reset() {} } session_;
+ struct { unsigned resets=0;void reset() { ++resets; } } session_;
  struct { char configToken[256]="token",guestToken[128]={},bookId[64]="123"; unsigned version=1; bool succeeded=true,hasReadingTime=true; uint64_t readingTime=300; } reply_;
  WeReadTimeLedger ledger; WeReadTimeLedger* ledger_=&ledger;
  int credentials_=0,position_=0,scratch_=0,hours_[16];
@@ -149,26 +202,59 @@ struct Upload {
  uint64_t before_=0; unsigned version_=1; int posts=0,gets=0; Error response=Error::Ok;
  bool loadCredentials() { return true; } bool resolvePosition() { return true; }
  Error request(const char*,bool post=false) { if(post)++posts;else++gets;return response; }
+ Phase failurePhase_=Phase::Load;
+ uint32_t nextVerify_=0;uint8_t verifyAttempts_=0;
+ bool postAcknowledged_=false,verifyWaiting_=false;
+ unsigned savedDiagnostics=0,diagnosticFlight=0;
+ void saveDiagnostic(Error) { ++savedDiagnostics;diagnosticFlight=ledger.inFlightSeconds(); }
  bool step(Error&);
 };
 '''+step+r'''
+bool advance(Upload& u,Error& error) {
+ if(u.verifyWaiting_)tick=u.nextVerify_;
+ return u.step(error);
+}
 int main() {
  Error error;
  Upload ok; assert(!ok.step(error)); assert(ok.posts==1 && ok.ledger.flight==300 && !ok.ledger.accepted);
- assert(ok.step(error) && error==Error::Ok); assert(ok.ledger.accepted==300 && !ok.ledger.flight);
- assert(ok.step(error)); assert(ok.posts==1);
+ assert(ok.session_.resets==1 && ok.postAcknowledged_);
+ assert(!ok.step(error) && ok.gets==0); // Initial confirmation delay is nonblocking.
+ assert(advance(ok,error) && error==Error::Ok); assert(ok.ledger.accepted==300 && !ok.ledger.flight);
+ assert(ok.step(error)); assert(ok.posts==1 && !ok.savedDiagnostics);
  for (Error e:{Error::Network,Error::Protocol,Error::SessionExpired}) {
   Upload u; u.response=e; assert(u.step(error)); assert(u.posts==1 && u.ledger.uncertain==300 && !u.ledger.pending);
-  u.response=Error::Ok; assert(u.step(error)); assert(u.posts==1 && !u.ledger.accepted);
+  assert(u.savedDiagnostics==1 && u.diagnosticFlight==300 && u.failurePhase_==Upload::Phase::Post);
+  u.response=Error::Ok; assert(u.step(error)); assert(u.posts==1 && !u.ledger.accepted && u.savedDiagnostics==1);
  }
  Upload no; no.ledger.writable=false; assert(no.step(error)); assert(no.posts==0 && no.ledger.pending==300);
- Upload uncredited; assert(!uncredited.step(error)); uncredited.reply_.readingTime=0;
- assert(uncredited.step(error)); assert(uncredited.ledger.uncertain==300 && !uncredited.ledger.accepted);
- Upload delayed; assert(!delayed.step(error)); delayed.response=Error::Network;
- assert(delayed.step(error)); assert(delayed.posts==1 && delayed.ledger.uncertain==300);
+ // Eventual consistency: first two reads lag, third matches. There is still one POST.
+ Upload lag; assert(!lag.step(error)); lag.reply_.readingTime=0;
+ assert(!advance(lag,error) && !lag.ledger.uncertain);assert(!advance(lag,error));
+ lag.reply_.readingTime=300;assert(advance(lag,error)&&error==Error::Ok);
+ assert(lag.posts==1&&lag.gets==3&&lag.ledger.accepted==300&&!lag.savedDiagnostics);
+ // A transient read failure reconnects. No retry is allowed for the POST itself.
+ Upload transient;assert(!transient.step(error));transient.response=Error::Network;
+ assert(!advance(transient,error));assert(transient.ledger.flight==300&&!transient.ledger.uncertain);
+ auto calls=transient.gets;assert(!transient.step(error)&&transient.gets==calls);
+ transient.response=Error::Ok;assert(advance(transient,error));assert(transient.ledger.accepted==300&&transient.posts==1);
+ // Bound attempts for both persistent network failure and stale stats, preserving non-replay.
+ for(bool network:{false,true}) {
+  Upload u; assert(!u.step(error));u.reply_.readingTime=0;
+  if(network)u.response=Error::Network;
+  assert(!advance(u,error));assert(!advance(u,error));assert(advance(u,error));
+  assert(u.posts==1&&u.gets==3&&u.ledger.uncertain==300&&!u.ledger.accepted);
+  assert(u.savedDiagnostics==1&&u.diagnosticFlight==300&&u.failurePhase_==Upload::Phase::Verify);
+  assert(u.step(error)&&u.posts==1&&u.gets==3&&u.savedDiagnostics==1);
+ }
  Upload rejected; rejected.reply_.succeeded=false; assert(rejected.step(error)); assert(rejected.ledger.uncertain==300);
  Upload wrongBook; assert(!wrongBook.step(error)); strcpy(wrongBook.reply_.bookId,"999");
- assert(wrongBook.step(error)); assert(wrongBook.ledger.uncertain==300);
+ assert(advance(wrongBook,error)); assert(wrongBook.ledger.uncertain==300&&wrongBook.gets==1);
+ for(Error e:{Error::Protocol,Error::SessionExpired}) {
+  Upload u;assert(!u.step(error));u.response=e;assert(advance(u,error));assert(u.gets==1&&u.ledger.uncertain==300);
+ }
+ // Delay arithmetic works across millis() rollover.
+ tick=UINT32_MAX-100;Upload wrap;assert(!wrap.step(error));assert(!wrap.step(error)&&wrap.gets==0);
+ tick+=499;assert(!wrap.step(error)&&wrap.gets==0);++tick;assert(wrap.step(error)&&wrap.ledger.accepted==300);
 }
 '''
         compile_run(code)

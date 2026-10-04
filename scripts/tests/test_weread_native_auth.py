@@ -34,6 +34,7 @@ namespace WeReadClient {
   bool beginProgressSync(const char*,int,ProgressSyncMode) { ++starts;return true; }
   Event step() { return event; } Error error() const { return err; }
   void reset() { ++resets; } Result progressSyncResult() { return {}; }
+  const char* nativeTimeDiagnostic() { return "U6 N7 T9:-125 H200 E0 V3"; }
  };
 }
 using E=WeReadClient::Error;
@@ -72,6 +73,7 @@ struct WeReadProgressSyncActivity {
  WeReadNativeAuth::Login::Failure authFailure_=WeReadNativeAuth::Login::Failure::None;
  WeReadNativeAuth::Login::Phase authPhase_=WeReadNativeAuth::Login::Phase::Load;
  char authDiagnostic_[96]={};
+ char timeDiagnostic_[96]={};
  bool radioStopped_=false,timeReady_=true,nativeReady_=false,forceNativeLogin_=false,nativeRecoveryAttempted_=false;
  bool wifiChild=false,returned=false,uploadConflict_=false;float remoteFraction_=0;
  std::atomic<bool> fullRefreshPending_{false};
@@ -114,7 +116,7 @@ int main() {
    assert(p.timeLedger_.pending==0&&p.timeLedger_.uncertain==300);
    p.startSync();assert(p.nativeLogin_->forced);
    p.nativeLogin_->event=A::Event::Complete;p.advanceNativeLogin();assert(!authLive);
-   p.state_=S::TimeSyncing;p.advanceSync();assert(p.state_==S::TimeFailed&&!authLive);
+   p.state_=S::TimeSyncing;p.advanceSync();assert(p.state_==S::TimeFailed&&!authLive);assert(strstr(p.timeDiagnostic_,"U6 N7"));
  }
  // Web-session expiry still uses its own login path; native QR cannot replace Web cookies.
  { WeReadProgressSyncActivity p;p.state_=S::Syncing;p.operation_.event=O::Event::Failed;p.operation_.err=E::SessionExpired;

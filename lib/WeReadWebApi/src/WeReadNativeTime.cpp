@@ -228,30 +228,33 @@ Error Upload::request(const char* path, bool post) {
   options.bodySize = post ? strlen(body_) : 0;
   options.timeoutMs = 15000;
   options.rootCA = kRootCA;
+  options.redactUrl = true;
   options.readBuffer = io_;
   options.readBufferSize = sizeof(io_);
+  options.diagnostic = &diagnostic_;
   reply_ = {};
   StreamingJsonParser parser(reply_.callbacks());
-  int status = 0;
-  size_t received = 0;
-  auto result = WeReadHttpClient::request(
+  httpStatus_ = -1;
+  received_ = 0;
+  transportResult_ = WeReadHttpClient::request(
       session_, url, options,
       [&](const uint8_t* data, size_t length) {
-        received += length;
-        if (received > 256 * 1024) return false;
+        received_ += length;
+        if (received_ > 256 * 1024) return false;
         parser.feed(reinterpret_cast<const char*>(data), length);
         return !parser.hasError() && !reply_.invalid;
       },
-      {}, status);
+      {}, httpStatus_);
   parser.feed(" ", 1);
+  parserError_ = parser.hasError();
   // A verified HTTP auth rejection is decisive even if its error body is truncated.
-  if (status == 401 || status == 403) return Error::SessionExpired;
-  if (result == WeReadHttpClient::Result::Aborted) return Error::Protocol;
-  if (result != WeReadHttpClient::Result::Ok) return Error::Network;
+  if (httpStatus_ == 401 || httpStatus_ == 403) return Error::SessionExpired;
+  if (transportResult_ == WeReadHttpClient::Result::Aborted) return Error::Protocol;
+  if (transportResult_ != WeReadHttpClient::Result::Ok) return Error::Network;
   if (!parser.hasError() && !reply_.invalid && reply_.closed &&
       (reply_.errorCode == -2012 || reply_.errorCode == -2010))
     return Error::SessionExpired;
-  if (status != 200 || parser.hasError() || reply_.invalid || !reply_.closed || reply_.errorCode)
+  if (httpStatus_ != 200 || parser.hasError() || reply_.invalid || !reply_.closed || reply_.errorCode)
     return Error::Protocol;
   return Error::Ok;
 }
@@ -282,6 +285,10 @@ bool Upload::resolvePosition() {
 }
 bool Upload::step(Error& error) {
   error = Error::Ok;
+  if (phase_ == Phase::Verify && verifyWaiting_) {
+    if (static_cast<int32_t>(millis() - nextVerify_) < 0) return false;
+    verifyWaiting_ = false;
+  }
   char path[128];
   switch (phase_) {
     case Phase::Load:
@@ -339,6 +346,9 @@ bool Upload::step(Error& error) {
       }
       break;
     case Phase::Post: {
+      // Do not risk sending the only POST on a keep-alive socket closed while
+      // the device was between steps. Never retry this non-idempotent request.
+      session_.reset();
       unsigned count = ledger_->batchHours(hours_, WeReadTimeLedger::kBatchHours);
       if (!batch(credentials_, bookId_, version_, position_, hours_, count, guest_, token_,
                  TimeUtils::getCurrentValidTimestamp(), static_cast<uint32_t>(random(0, 1000)), scratch_, sha256, body_,
@@ -355,14 +365,33 @@ bool Upload::step(Error& error) {
       if (error == Error::Ok) {
         if (!reply_.succeeded)
           error = Error::Protocol;
-        else
+        else {
+          postAcknowledged_ = true;
+          verifyAttempts_ = 0;
+          nextVerify_ = millis() + 500;
+          verifyWaiting_ = true;
           phase_ = Phase::Verify;
+        }
       }
       break;
     }
     case Phase::Verify:
+      ++verifyAttempts_;
       snprintf(path, sizeof(path), "/book/getProgress?bookId=%s", bookId_);
       error = request(path);
+      // Only a confirmed POST reaches Verify. Re-query its result on a fresh
+      // connection for transient read failures or a lagging statistic; never
+      // send the duration again. Three GETs maximum while this screen is open.
+      if (verifyAttempts_ < 3 &&
+          (error == Error::Network ||
+           (error == Error::Ok && !strcmp(reply_.bookId, bookId_) && reply_.hasReadingTime &&
+            (reply_.readingTime < before_ || reply_.readingTime - before_ < ledger_->inFlightSeconds())))) {
+        session_.reset();
+        nextVerify_ = millis() + 1500 * verifyAttempts_;
+        verifyWaiting_ = true;
+        error = Error::Ok;
+        return false;
+      }
       if (error == Error::Ok) {
         if (strcmp(reply_.bookId, bookId_) || !reply_.hasReadingTime || reply_.readingTime < before_ ||
             reply_.readingTime - before_ < ledger_->inFlightSeconds())
@@ -380,6 +409,8 @@ bool Upload::step(Error& error) {
       return true;
   }
   if (error != Error::Ok) {
+    failurePhase_ = phase_;
+    saveDiagnostic(error);  // Capture the in-flight amount before quarantining it.
     // A timeout, uncertain reply, or delayed statistic must never cause replay.
     if (!ledger_->quarantineBatch()) error = Error::SdCard;
     session_.reset();
@@ -387,6 +418,36 @@ bool Upload::step(Error& error) {
     return true;
   }
   return false;
+}
+void Upload::diagnosticCode(char* out, size_t capacity) const {
+  snprintf(out, capacity, "U%u N%u T%u:%d H%d E%d V%u", unsigned(failurePhase_), unsigned(diagnostic_.stage),
+           unsigned(diagnostic_.tlsStage), diagnostic_.tlsError, httpStatus_, reply_.errorCode,
+           unsigned(verifyAttempts_));
+}
+void Upload::saveDiagnostic(Error error) {
+  // Reuse the dead POST buffer, once per terminal failure. No personal IDs,
+  // tokens, request bodies or background writes; ledger files remain unchanged.
+  const int n = snprintf(
+      body_, sizeof(body_),
+      "version=%s\nutc=%lu\nupload_phase=%u\nerror=%u\nhttp_stage=%u\nhttp_status=%d\ntransport_result=%u\n"
+      "tls_stage=%u\ntls_error=%d\nfirst_tls_error=%d\nreceived=%u\napi_error=%d\njson_error=%u\ninvalid=%u\n"
+      "closed=%u\npost_acknowledged=%u\nverify_attempts=%u\ncloud_before=%llu\ncloud_observed=%llu\n"
+      "has_cloud_observed=%u\ninflight_seconds=%lu\nfree_before=%lu\nlargest_before=%lu\nfree_after=%lu\n"
+      "largest_after=%lu\n",
+      CROSSPOINT_VERSION, static_cast<unsigned long>(TimeUtils::getCurrentValidTimestamp()), unsigned(failurePhase_),
+      unsigned(error), unsigned(diagnostic_.stage), httpStatus_, unsigned(transportResult_),
+      unsigned(diagnostic_.tlsStage), diagnostic_.tlsError, diagnostic_.firstTlsError, unsigned(received_),
+      reply_.errorCode, unsigned(parserError_), unsigned(reply_.invalid), unsigned(reply_.closed),
+      unsigned(postAcknowledged_), unsigned(verifyAttempts_), static_cast<unsigned long long>(before_),
+      static_cast<unsigned long long>(reply_.readingTime), unsigned(reply_.hasReadingTime),
+      static_cast<unsigned long>(ledger_->inFlightSeconds()), static_cast<unsigned long>(diagnostic_.freeBefore),
+      static_cast<unsigned long>(diagnostic_.largestBefore), static_cast<unsigned long>(diagnostic_.freeAfter),
+      static_cast<unsigned long>(diagnostic_.largestAfter));
+  if (n <= 0 || size_t(n) >= sizeof(body_) || !WeReadStore::ensureRoot()) return;
+  HalFile file;
+  if (Storage.openFileForWrite("WRNative", "/.crosspoint/weread/native-time-error.txt", file) &&
+      file.write(reinterpret_cast<const uint8_t*>(body_), n) == size_t(n))
+    file.flush();
 }
 static_assert(sizeof(Upload) <= 12 * 1024, "Native upload fixed workspace exceeds 12 KiB");
 }  // namespace WeReadNativeTime

@@ -60,6 +60,7 @@ class WeReadProgressSyncActivity final : public Activity {
   WeReadNativeAuth::Login::Failure authFailure_ = WeReadNativeAuth::Login::Failure::None;
   WeReadNativeAuth::Login::Phase authPhase_ = WeReadNativeAuth::Login::Phase::Load;
   char authDiagnostic_[96] = {};
+  char timeDiagnostic_[96] = {};
   bool nativeReady_ = false;
   bool nativeRecoveryAttempted_ = false;
   bool forceNativeLogin_ = false;

@@ -104,6 +104,7 @@ class Operation {
   bool setChapterRange(uint32_t first, uint32_t last);
 
   Error error() const { return error_; }
+  const char* nativeTimeDiagnostic() const { return phase_ == Phase::Failed && timeLedger_ ? loginUid_ : ""; }
   uint32_t chapterCount() const { return chapterCount_; }
   ProgressStage progressStage() const { return progressStage_; }
   uint32_t progressCompleted() const { return progressCompleted_; }
@@ -426,6 +427,8 @@ class Operation {
   int responseStatus_ = 0;
   uint32_t progressUploadStartedAt_ = 0;
   char previousVid_[64] = {};
+  // Web QR UID; reused for the error code after native upload terminates.
+  // These phases are disjoint, preserving the 8 KiB operation workspace.
   char loginUid_[128] = {};
   char psvts_[128] = {};
   float initialProgressFraction_ = 0.0f;

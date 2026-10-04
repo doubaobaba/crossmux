@@ -1,6 +1,6 @@
 # Native offline reading-time sync test build
 
-Test6 base `f7641b0ea445d4acd0fc2c3bda403659e66e3b27`; version `1.6.0-time-test6`.
+Test7 base `19f156929ba1855c8ebce69626a3770942417589`; version `1.6.0-time-test7`.
 The SDK is pinned by the `freeink-sdk` gitlink; the output manifest records its exact commit.
 X3/X4 ESP32-C3 `gh_release`; original partitions and SD updater.
 
@@ -126,9 +126,9 @@ credit and physical UI/heap/power remain acceptance tests, not host-test claims.
 
 ## Device acceptance
 
-1. Back up SD (including hidden `.crosspoint`). Copy test6 `update.bin` and use
+1. Back up SD (including hidden `.crosspoint`). Copy test7 `update.bin` and use
    the working CrossMux SD updater. Preserve existing books, sessions and ledgers.
-2. Confirm About shows `1.6.0-time-test6`. Connect once and verify clock/date before
+2. Confirm About shows `1.6.0-time-test7`. Connect once and verify clock/date before
    reading offline. Compare the phone's starting book/day time.
 3. Read a NEW short session, with normal manual page turns. Open Sync Progress,
    scan/confirm if prompted, resolve direction if asked, and wait for the network
@@ -350,3 +350,57 @@ performed: final physical login/save/time-sync acceptance remains an X3 check.
 升级到 `1.6.0-time-test6` 后，在原来的书中点“同步进度”，扫码并确认。
 成功后再点一次同步，应复用已保存凭证；手机端核对时长即可。卡上历史记录
 保持原样，本次电脑端不提交任何阅读时长。
+
+
+## Test7: bounded result confirmation and upload diagnostics
+
+The owner confirmed that test6 completes QR login and saves the native session.
+A subsequent time upload stopped with a Network error and quarantined duration;
+a later attempt showed a Protocol error. The old build persisted only login
+failure diagnostics, so its photos and ledger cannot establish whether the first
+failure was in the POST response or in the following verification GET. Read-only
+cloud statistics show matching daily buckets, but without a captured pre-upload
+baseline that is not proof of full per-batch acknowledgement. Existing uncertain
+records must not be reset, replayed or marked accepted from this observation.
+
+Test7 closes two robustness/observability gaps; it is not a claim that the exact
+first device transport failure was reproduced:
+
+- Close the preparatory keep-alive session before the sole non-idempotent POST,
+  avoiding reuse of a peer-closed connection between activity steps. This adds
+  at most one TLS connection per attempted batch; no POST retry is introduced.
+- After an explicit successful POST reply, wait 500 ms and query the book time.
+  A Network failure or well-formed same-book statistic that has not reached the
+  expected increment schedules another read, at most three verification GETs
+  with 1.5/3-second gaps. Retry connections are fresh. Waits are nonblocking and
+  work across millis rollover. Cancellation still exits at request boundaries.
+  Mismatched books, malformed replies, auth rejection and SD failure stay terminal.
+- Each terminal upload failure captures HTTP/TLS stage and status, parser flags,
+  POST acknowledgement, verification attempt count, pre-upload/observed cloud
+  seconds, and in-flight seconds before quarantine. The screen shows
+  `U<phase> N<http-stage> T<tls-stage>:<tls-error> H<status> E<api-error> V<reads>`.
+  Upload phases are Load0, Config1, Feature2, Info3, Progress4, Post5, Verify6.
+  The SD report is `/.crosspoint/weread/native-time-error.txt`; it contains no
+  credentials, account/book IDs, request body or URL. A later failure replaces it.
+
+The failure report reuses the no-longer-needed 4096-byte POST buffer, with one
+small write on terminal failure. Fixed diagnostics and counters add no separate
+allocation; the existing upload workspace remains capped at 12 KiB. The operation reuses its
+inactive Web-login UID scratch buffer; the activity retains a 96-byte error code. There is no new background
+worker, periodic Wi-Fi activation or reading-time/card-format change. Normal
+successful confirmation adds only its 500 ms delay; failure GETs remain bounded
+by the existing 15-second timeout. Device peak heap and power are not host-test
+claims.
+
+Production-method regression tests exercise delayed statistics, transient GET
+failure, attempt exhaustion, no POST replay, error snapshot before quarantine,
+wrong-book/auth/protocol failures, timer rollover and secret-free diagnostic SD
+writes. Activity coverage checks that the error code survives operation cleanup.
+All tests use synthetic values; the desktop inspection used GET only and did not
+submit any new or historical duration.
+
+Upgrade without replacing session or ledger files. Confirm `1.6.0-time-test7`,
+then sync a short genuinely new reading interval or an unattempted pending batch.
+Existing uncertain totals will remain displayed. If failure recurs, preserve the
+full U/N/T/H/E/V code and SD report before additional attempts. Do not restore an
+old pending ledger over the current one: the cloud may already have accepted it.

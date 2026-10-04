@@ -3930,6 +3930,7 @@ Operation::Event Operation::step(const WeReadStore::WorkCallback callback, void*
       if (!nativeTime_ || !timeLedger_) return fail(Error::Protocol);
       Error error = Error::Ok;
       if (!nativeTime_->step(error)) return Event::None;
+      if (error != Error::Ok) nativeTime_->diagnosticCode(loginUid_, sizeof(loginUid_));
       nativeTime_.reset();
       if (error != Error::Ok) return fail(error);  // Never enter automatic POST retry/reauth.
       phase_ = Phase::Complete;
