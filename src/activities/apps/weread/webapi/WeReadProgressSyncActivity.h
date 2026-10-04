@@ -1,6 +1,7 @@
 #pragma once
 
 #include <WeReadNativeAuth.h>
+#include <WeReadNativeTime.h>
 #include <WeReadTimeLedger.h>
 
 #include <atomic>
@@ -52,8 +53,10 @@ class WeReadProgressSyncActivity final : public Activity {
   };
 
   State state_ = State::WifiSelection;
-  WeReadClient::Operation operation_;
-  WeReadTimeLedger timeLedger_;
+  WeReadTimeLedger timeLedger_;  // Outlives Upload, which quarantines on cancellation.
+  // These large workspaces are mutually exclusive; none belongs on the task stack.
+  std::unique_ptr<WeReadClient::Operation> operation_;
+  std::unique_ptr<WeReadNativeTime::Upload> nativeUpload_;
   uint64_t acceptedAtStart_ = 0;
   bool timeReady_ = false;
   std::unique_ptr<WeReadNativeAuth::Login> nativeLogin_;
@@ -87,6 +90,7 @@ class WeReadProgressSyncActivity final : public Activity {
   void startNativeLogin();
   void advanceNativeLogin();
   void advanceSync();
+  void advanceTimeSync();
   void beginSelectedDirection();
   void startTimeSync();
   void applyRemoteProgress(const WeReadProtocol::RemoteProgress& remote);

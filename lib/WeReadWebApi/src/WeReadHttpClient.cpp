@@ -266,6 +266,10 @@ WeReadHttpClient::Result runRequest(const char* url, const WeReadHttpClient::Req
   }
   memcpy(sessionHost, host, strlen(host) + 1);
 
+  if (options.beforeSend && !options.beforeSend(options.beforeSendContext)) {
+    cleanupClient(client);
+    return WeReadHttpClient::Result::Aborted;
+  }
   requestStage(options, WeReadHttpClient::RequestStage::Write);
   bool hasUserAgent = false;
   char contentLength[32];
@@ -514,6 +518,11 @@ WeReadHttpClient::Result runRequest(const char* url, const WeReadHttpClient::Req
   }
 
   requestStage(options, WeReadHttpClient::RequestStage::Connect);
+  // open() sends headers as well as connecting: reserve before it on this backend.
+  if (options.beforeSend && !options.beforeSend(options.beforeSendContext)) {
+    cleanupClient(client);
+    return WeReadHttpClient::Result::Aborted;
+  }
   esp_err_t err = esp_http_client_open(client, static_cast<int>(options.bodySize));
   if (err != ESP_OK) {
     LOG_ERR("HTTP", "verified request open failed: %s", esp_err_to_name(err));

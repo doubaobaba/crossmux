@@ -1,6 +1,6 @@
 # Native offline reading-time sync test build
 
-Test7 base `19f156929ba1855c8ebce69626a3770942417589`; version `1.6.0-time-test7`.
+Test8 base `1fcdc79be5e473f575722f9219501fc7caf465f7`; version `1.6.0-time-test8`.
 The SDK is pinned by the `freeink-sdk` gitlink; the output manifest records its exact commit.
 X3/X4 ESP32-C3 `gh_release`; original partitions and SD updater.
 
@@ -112,9 +112,10 @@ One ~700-byte fixed ledger and clock in the reader, one ledger in the sync
 activity; 684 bytes per SD slot, two slots. Commit uses two 684-byte byte buffers
 and a bounded record copy, not an unbounded queue. The book-open session uses
 checked heap allocation and is released immediately. Native sync additionally
-uses one checked, activity-scoped allocation capped at 12 KiB: request body,
-signing scratch, parser reply and credentials. This cannot live on the small
-reader task stack; it is freed on completion/cancellation/reset. TLS allocations
+uses one checked, activity-scoped allocation capped at 8 KiB: request body,
+parser reply and credentials. The separate 3.5 KiB signing scratch is released
+before TLS. The inactive Web workspace is freed before native upload. None of
+these large objects live on the reader task stack. TLS allocations
 are existing transport behavior. Measure actual free heap and power on X3.
 
 Host tests cover hour/midnight splitting, idle gaps, invalid clock, queue bounds,
@@ -126,9 +127,9 @@ credit and physical UI/heap/power remain acceptance tests, not host-test claims.
 
 ## Device acceptance
 
-1. Back up SD (including hidden `.crosspoint`). Copy test7 `update.bin` and use
+1. Back up SD (including hidden `.crosspoint`). Copy test8 `update.bin` and use
    the working CrossMux SD updater. Preserve existing books, sessions and ledgers.
-2. Confirm About shows `1.6.0-time-test7`. Connect once and verify clock/date before
+2. Confirm About shows `1.6.0-time-test8`. Connect once and verify clock/date before
    reading offline. Compare the phone's starting book/day time.
 3. Read a NEW short session, with normal manual page turns. Open Sync Progress,
    scan/confirm if prompted, resolve direction if asked, and wait for the network
@@ -404,3 +405,64 @@ then sync a short genuinely new reading interval or an unattempted pending batch
 Existing uncertain totals will remain displayed. If failure recurs, preserve the
 full U/N/T/H/E/V code and SD report before additional attempts. Do not restore an
 old pending ledger over the current one: the cloud may already have accepted it.
+
+
+## Test8: release idle workspaces before native TLS; reserve only before sending
+
+The actual test7 SD diagnostic reports `U5 N3 T6:-155 H-1 E0 V0`, first TLS
+error -155, zero received bytes, no HTTP status, no POST acknowledgement, and
+8 in-flight seconds. Free heap before the failing request was 34,116 bytes;
+the largest free block was 21,492 bytes. Both wolfSSL attempts failed before
+HTTP writes. This attempt provides no evidence of an API duration restriction.
+
+The exact Arduino-wolfSSL 5.7.2 sources reproduce -155 under a constrained host
+allocator: at a 24,000-byte allocation budget, automatic TLS fails with -125
+and explicit TLS 1.2 fails with -155 after a denied allocation. Both pass at
+32,000 bytes. Certificate verification masks some crypto failures as -155.
+These host figures are not MCU heap requirements; they establish that -155
+can result from memory exhaustion, not that every -155 is an allocation failure.
+The X3 cause still requires physical validation of this reduced-memory build.
+
+Changes and resource budget:
+
+- The progress Activity owns Web Operation, native Login, and native Upload
+  as mutually exclusive checked allocations. It frees Operation before native
+  TLS and frees native workspaces before Web TLS. These ~8 KiB objects cannot
+  fit the task stack; allocation is limited to user-initiated stages, not pages.
+- Upload no longer retains the 3,584-byte signing Scratch. A checked temporary
+  exists only after releasing the previous TLS session; it is freed before
+  reconnecting. Upload now has an 8 KiB static assertion (previously 12 KiB).
+- ESP32-C3 debug type sizes: Operation 8,176 bytes, new Upload 8,016 bytes,
+  new sync Activity 1,656 bytes. Removing the embedded Operation (replaced with
+  two 4-byte pointers) and retained Scratch reduces native-stage workspace by
+  11,752 bytes, before allocator metadata. Actual free heap depends on runtime
+  fragmentation and other components; no TLS checks or root CAs were weakened.
+- RequestOptions has an optional non-allocating beforeSend hook. The wolfSSL
+  backend calls it exactly once after connection succeeds, before any HTTP
+  byte. Native upload durably reserves the ledger there. DNS/TCP/TLS failure
+  leaves time pending, while a write/response/confirmation failure quarantines
+  the batch. The ESP HTTP backend conservatively calls the hook before open(),
+  because that API writes headers while opening the connection.
+- Cancellation frees TLS and quarantines any in-flight batch. The Activity's
+  ledger is declared before Upload so it outlives Upload's destructor.
+- No background networking, auto-replay, fabricated duration, ledger format
+  change, or additional waiting service is introduced.
+
+Host regression checks exercise actual HTTP hook order (connect failure,
+callback failure, successful send, partial write, offline), production native
+request reservation, OOM, mutually exclusive Activity lifetimes, auth expiry,
+cancellation before/after sending, bounded GET confirmation, and no POST replay.
+
+For this user's recovery only, the two verified SD slots retain the precise
+8-second flight at sequence 102 and its quarantine at sequence 103. The
+matching diagnostic proves it was never sent. Restore only those 8 seconds
+into their original hourly bucket using a new checksummed sequence 104, keeping
+the earlier 4,107 uncertain seconds untouched. Do not restore an old ledger or
+infer the outcome of the earlier batch from this newer TLS failure. The desktop
+only queries cloud statistics; it submits no reading time.
+
+Device acceptance: upgrade to test8, read briefly, then use Sync Progress.
+The restored 8 seconds plus new reading should upload and confirm promptly.
+A pre-send TLS failure must leave those seconds pending rather than increasing
+uncertain seconds. Preserve any new native-time-error.txt for diagnosis.
+The older 4,107 seconds remain uncertain and must not be automatically replayed.

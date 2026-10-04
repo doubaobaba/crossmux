@@ -169,14 +169,19 @@ int main(){
 
     def test_non_idempotent_post_and_verification_failures_never_replay(self):
         source=(LIB/'WeReadNativeTime.cpp').read_text()
-        step=source[source.index('bool Upload::step('):source.index('void Upload::diagnosticCode(')]
+        step=source[source.index('Upload::~Upload('):source.index('void Upload::diagnosticCode(')]
         code=r'''
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <initializer_list>
-enum class Error { Ok, Clock, SessionExpired, Protocol, Unavailable, SdCard, Network };
+#include <memory>
+#define LOG_ERR(...)
+bool allocationFails=false;
+template<class T> std::unique_ptr<T> makeUniqueNoThrow() { return allocationFails?nullptr:std::make_unique<T>(); }
+struct Scratch {};
+enum class Error { Ok, Clock, SessionExpired, Protocol, Unavailable, SdCard, Network, OutOfMemory };
 uint32_t tick=0;uint32_t millis() { return tick; }
 namespace TimeUtils { uint32_t getCurrentValidTimestamp() { return 1700056800; } }
 long random(long,long) { return 20; }
@@ -197,16 +202,18 @@ struct Upload {
  struct { unsigned resets=0;void reset() { ++resets; } } session_;
  struct { char configToken[256]="token",guestToken[128]={},bookId[64]="123"; unsigned version=1; bool succeeded=true,hasReadingTime=true; uint64_t readingTime=300; } reply_;
  WeReadTimeLedger ledger; WeReadTimeLedger* ledger_=&ledger;
- int credentials_=0,position_=0,scratch_=0,hours_[16];
+ int credentials_=0,position_=0,hours_[16];
  char bookId_[64]="123",body_[4096]={},token_[256]={},guest_[128]={};
  uint64_t before_=0; unsigned version_=1; int posts=0,gets=0; Error response=Error::Ok;
  bool loadCredentials() { return true; } bool resolvePosition() { return true; }
- Error request(const char*,bool post=false) { if(post)++posts;else++gets;return response; }
+ Error request(const char*,bool post=false) { if(post){ if(!connected)return Error::Network; if(!ledger_->prepareBatch())return Error::SdCard;++posts; }else++gets;return response; }
+ bool connected=true;
  Phase failurePhase_=Phase::Load;
  uint32_t nextVerify_=0;uint8_t verifyAttempts_=0;
  bool postAcknowledged_=false,verifyWaiting_=false;
  unsigned savedDiagnostics=0,diagnosticFlight=0;
  void saveDiagnostic(Error) { ++savedDiagnostics;diagnosticFlight=ledger.inFlightSeconds(); }
+ ~Upload();
  bool step(Error&);
 };
 '''+step+r'''
@@ -216,6 +223,12 @@ bool advance(Upload& u,Error& error) {
 }
 int main() {
  Error error;
+ WeReadTimeLedger cancelled;
+ {Upload u;u.ledger_=&cancelled;assert(!u.step(error));assert(cancelled.flight==300);}
+ assert(cancelled.uncertain==300&&!cancelled.pending&&!cancelled.flight);
+ WeReadTimeLedger unsent;
+ {Upload u;u.ledger_=&unsent;u.phase_=Upload::Phase::Load;}
+ assert(unsent.pending==300&&!unsent.uncertain);
  Upload ok; assert(!ok.step(error)); assert(ok.posts==1 && ok.ledger.flight==300 && !ok.ledger.accepted);
  assert(ok.session_.resets==1 && ok.postAcknowledged_);
  assert(!ok.step(error) && ok.gets==0); // Initial confirmation delay is nonblocking.
@@ -226,6 +239,8 @@ int main() {
   assert(u.savedDiagnostics==1 && u.diagnosticFlight==300 && u.failurePhase_==Upload::Phase::Post);
   u.response=Error::Ok; assert(u.step(error)); assert(u.posts==1 && !u.ledger.accepted && u.savedDiagnostics==1);
  }
+ Upload pre;pre.connected=false;assert(pre.step(error)&&error==Error::Network);assert(pre.posts==0&&pre.ledger.pending==300&&!pre.ledger.uncertain);
+ allocationFails=true;Upload oom;assert(oom.step(error)&&error==Error::OutOfMemory);assert(oom.posts==0&&oom.ledger.pending==300&&!oom.ledger.uncertain);allocationFails=false;
  Upload no; no.ledger.writable=false; assert(no.step(error)); assert(no.posts==0 && no.ledger.pending==300);
  // Eventual consistency: first two reads lag, third matches. There is still one POST.
  Upload lag; assert(!lag.step(error)); lag.reply_.readingTime=0;
@@ -258,6 +273,84 @@ int main() {
 }
 '''
         compile_run(code)
+
+
+    def test_production_request_durable_reservation_gate(self):
+        source=(LIB/'WeReadNativeTime.cpp').read_text()
+        header=(LIB/'WeReadNativeTime.h').read_text()
+        reply=header[header.index('struct Reply {'):header.index('// One bounded')]
+        helpers=source[source.index('bool copy('):source.index('bool sha256(')]
+        request=source[source.index('Error Upload::request('):source.index('bool Upload::resolvePosition(')]
+        compile_run(r'''
+#include "WeReadNativeProtocol.h"
+#include <StreamingJsonParser.h>
+#include <cassert>
+#include <cstdio>
+#include <cstring>
+#include <functional>
+#include <initializer_list>
+using namespace WeReadNativeProtocol;
+enum class Error {Ok,Protocol,SdCard,SessionExpired,Network};
+''' + reply + helpers + r'''
+JsonCallbacks Reply::callbacks() { return {this,onKey,value,value,nullptr,nullptr,start,end,start,end,chunks}; }
+const char* kRootCA="trusted-root";
+struct Ledger {
+ bool writable=true;unsigned reserves=0,pending=300,flight=0;
+ bool healthy(){return writable;}
+ bool prepareBatch(){++reserves;if(!writable)return false;flight=pending;pending=0;return true;}
+};
+#define WeReadTimeLedger Ledger
+int fault=0;unsigned writes=0;
+namespace WeReadHttpClient {
+ enum class Result {Ok,NetworkError,Aborted};
+ struct Session {};
+ struct Header {const char* name;const char* value;};
+ struct Diagnostic {};
+ struct RequestOptions {
+ const char* method;const Header* headers;size_t headerCount;const uint8_t* body;size_t bodySize;int timeoutMs;
+ const char* rootCA;bool redactUrl;uint8_t* readBuffer;size_t readBufferSize;Diagnostic* diagnostic;
+ bool(*beforeSend)(void*)=nullptr;void* beforeSendContext=nullptr;
+ };
+ using DataCallback=std::function<bool(const uint8_t*,size_t)>;
+ using HeaderCallback=std::function<void(const char*,const char*)>;
+ Result request(Session&,const char*,const RequestOptions& o,const DataCallback& cb,const HeaderCallback&,int& status){
+  assert(o.rootCA==kRootCA&&o.redactUrl);
+  const bool post=!strcmp(o.method,"POST");
+  assert(post==(o.beforeSend!=nullptr));
+  if(fault==1)return Result::NetworkError; // No callback or bytes on failed TLS.
+  if(o.beforeSend&&!o.beforeSend(o.beforeSendContext))return Result::Aborted;
+  if(post){assert(static_cast<Ledger*>(o.beforeSendContext)->flight==300);++writes;}
+  if(fault==2)return Result::NetworkError; // Partial HTTP write is uncertain.
+  status=fault==3?401:200;
+  const char* body=fault==4?"invalid-json":"{\"succ\":1}";
+  if(!cb(reinterpret_cast<const uint8_t*>(body),strlen(body)))return Result::Aborted;
+  return Result::Ok;
+ }
+}
+struct Upload {
+ Credentials credentials_;char body_[4096]="{}";uint8_t io_[1024];Reply reply_;
+ Ledger ledger;Ledger* ledger_=&ledger;
+ WeReadHttpClient::Session session_;WeReadHttpClient::Diagnostic diagnostic_;
+ int httpStatus_=-1;size_t received_=0;bool parserError_=false;
+ WeReadHttpClient::Result transportResult_;
+ Error request(const char*,bool post=false);
+};
+''' + request + r'''
+int main(){
+ for(int f:{0,1,2,3,4}){
+  fault=f;writes=0;Upload u;auto e=u.request("/book/batchUploadProgress",true);
+  if(f==1){assert(e==Error::Network&&u.ledger.pending==300&&!u.ledger.reserves&&!writes);}
+  else {assert(u.ledger.reserves==1&&u.ledger.flight==300&&!u.ledger.pending&&writes==1);}
+  if(f==0)assert(e==Error::Ok);
+  if(f==2)assert(e==Error::Network);
+  if(f==3)assert(e==Error::SessionExpired);
+  if(f==4)assert(e==Error::Protocol);
+ }
+ fault=0;writes=0;Upload broken;broken.ledger.writable=false;
+ assert(broken.request("/book/batchUploadProgress",true)==Error::SdCard&&!writes&&broken.ledger.pending==300);
+ Upload get;assert(get.request("/config?token=1")==Error::Ok&&!get.ledger.reserves&&!writes);
+}
+''',[ROOT/'lib/JsonParser/StreamingJsonParser.cpp'])
 
 if __name__=='__main__':
     unittest.main(verbosity=2)

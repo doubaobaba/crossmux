@@ -47,6 +47,10 @@ struct RequestOptions {
   uint8_t* readBuffer = nullptr;
   size_t readBufferSize = 0;
   Diagnostic* diagnostic = nullptr;
+  // Called once, before any HTTP bytes. wolfSSL connects first; the ESP HTTP
+  // backend must call before open(), which also writes headers. False aborts.
+  bool (*beforeSend)(void*) = nullptr;
+  void* beforeSendContext = nullptr;
 };
 
 struct HttpsUrlView {

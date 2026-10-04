@@ -111,6 +111,7 @@ void WeReadProgressSyncActivity::onEnter() {
 
 void WeReadProgressSyncActivity::onExit() {
   nativeLogin_.reset();
+  nativeUpload_.reset();
   operation_.reset();
   Activity::onExit();
   if (!wifiActivated_) return;
@@ -169,8 +170,19 @@ void WeReadProgressSyncActivity::startSync() {
     startNativeLogin();
     return;
   }
-  if (!operation_.beginProgressSync(bookId_, input_, syncMode_)) {
-    error_ = operation_.error();
+  // Web progress and native TLS never retain each other's large workspaces.
+  nativeUpload_.reset();
+  operation_ = makeUniqueNoThrow<WeReadClient::Operation>();
+  if (!operation_) {
+    LOG_ERR("WRSync", "OOM: progress sync (%u bytes)", unsigned(sizeof(WeReadClient::Operation)));
+    error_ = WeReadClient::Error::OutOfMemory;
+    state_ = State::Failed;
+    requestUpdate();
+    return;
+  }
+  if (!operation_->beginProgressSync(bookId_, input_, syncMode_)) {
+    error_ = operation_->error();
+    operation_.reset();
     state_ = error_ == WeReadClient::Error::SessionExpired ? State::LoginRequired : State::Failed;
     requestUpdate();
     return;
@@ -181,6 +193,7 @@ void WeReadProgressSyncActivity::startSync() {
 
 void WeReadProgressSyncActivity::startNativeLogin() {
   operation_.reset();
+  nativeUpload_.reset();
   authFailure_ = WeReadNativeAuth::Login::Failure::None;
   authPhase_ = WeReadNativeAuth::Login::Phase::Load;
   authDiagnostic_[0] = 0;
@@ -237,17 +250,47 @@ void WeReadProgressSyncActivity::advanceNativeLogin() {
 }
 
 void WeReadProgressSyncActivity::startTimeSync() {
+  operation_.reset();
+  nativeUpload_.reset();
   timeDiagnostic_[0] = 0;
   if (!timeReady_ || !timeLedger_.healthy()) {
     error_ = WeReadClient::Error::SdCard;
     state_ = State::TimeFailed;
   } else if (timeLedger_.pendingSeconds() == 0) {
     state_ = State::Success;
-  } else if (operation_.beginReadingTimeSync(bookId_, timeLedger_)) {
-    state_ = State::TimeSyncing;
   } else {
-    error_ = operation_.error();
+    nativeUpload_ = makeUniqueNoThrow<WeReadNativeTime::Upload>();
+    if (!nativeUpload_) {
+      LOG_ERR("WRSync", "OOM: native upload (%u bytes)", unsigned(sizeof(WeReadNativeTime::Upload)));
+      error_ = WeReadClient::Error::OutOfMemory;
+      state_ = State::TimeFailed;
+    } else if (!nativeUpload_->begin(bookId_, timeLedger_)) {
+      nativeUpload_.reset();
+      error_ = WeReadClient::Error::Protocol;
+      state_ = State::TimeFailed;
+    } else {
+      state_ = State::TimeSyncing;
+    }
+  }
+  requestUpdate();
+}
+
+void WeReadProgressSyncActivity::advanceTimeSync() {
+  RenderLock renderBarrier(*this);
+  if (auto* fontCache = renderer.getFontCacheManager()) fontCache->clearCache();
+  if (!nativeUpload_ || !nativeUpload_->step(error_)) return;
+  if (error_ != WeReadClient::Error::Ok) nativeUpload_->diagnosticCode(timeDiagnostic_, sizeof(timeDiagnostic_));
+  nativeUpload_.reset();
+  if (error_ == WeReadClient::Error::SessionExpired && !nativeRecoveryAttempted_) {
+    // Only unsent hours remain pending. Never replay an uncertain POST.
+    nativeRecoveryAttempted_ = true;
+    nativeReady_ = false;
+    forceNativeLogin_ = true;
+    state_ = State::Starting;
+  } else if (error_ != WeReadClient::Error::Ok) {
     state_ = State::TimeFailed;
+  } else {
+    state_ = timeLedger_.pendingSeconds() ? State::TimeStarting : State::Success;
   }
   requestUpdate();
 }
@@ -257,7 +300,8 @@ void WeReadProgressSyncActivity::advanceSync() {
   // caches before the handshake, matching the main WeRead activity.
   RenderLock renderBarrier(*this);
   if (auto* fontCache = renderer.getFontCacheManager()) fontCache->clearCache();
-  const auto event = operation_.step();
+  if (!operation_) return;
+  const auto event = operation_->step();
   switch (event) {
     case WeReadClient::Operation::Event::None:
     case WeReadClient::Operation::Event::Authenticated:
@@ -269,23 +313,8 @@ void WeReadProgressSyncActivity::advanceSync() {
       returnToReader();
       return;
     case WeReadClient::Operation::Event::Failed:
-      error_ = operation_.error();
-      if (state_ == State::TimeSyncing)
-        snprintf(timeDiagnostic_, sizeof(timeDiagnostic_), "%s", operation_.nativeTimeDiagnostic());
-      if (state_ == State::TimeSyncing && error_ == WeReadClient::Error::SessionExpired && !nativeRecoveryAttempted_) {
-        // Upload has already quarantined any attempted batch. Re-authentication
-        // can resume only unattempted hours, never replay the uncertain request.
-        operation_.reset();
-        nativeRecoveryAttempted_ = true;
-        nativeReady_ = false;
-        forceNativeLogin_ = true;
-        state_ = State::Starting;
-        requestUpdate();
-        return;
-      }
-      state_ = state_ == State::TimeSyncing
-                   ? State::TimeFailed
-                   : (error_ == WeReadClient::Error::SessionExpired ? State::LoginRequired : State::Failed);
+      error_ = operation_->error();
+      state_ = error_ == WeReadClient::Error::SessionExpired ? State::LoginRequired : State::Failed;
       operation_.reset();
       requestUpdate();
       return;
@@ -293,14 +322,7 @@ void WeReadProgressSyncActivity::advanceSync() {
       break;
   }
 
-  if (state_ == State::TimeSyncing) {
-    operation_.reset();
-    state_ = timeLedger_.pendingSeconds() ? State::TimeStarting : State::Success;
-    requestUpdate();
-    return;
-  }
-
-  const auto result = operation_.progressSyncResult();
+  const auto result = operation_->progressSyncResult();
   outcome_ = result.outcome;
   LOG_INF("WRSync", "sync complete: outcome=%u", static_cast<unsigned>(outcome_));
   operation_.reset();
@@ -501,6 +523,7 @@ void WeReadProgressSyncActivity::loop() {
       (state_ == State::Success || state_ == State::TimeFailed || state_ == State::Failed ||
        state_ == State::LoginRequired || state_ == State::AuthFailed)) {
     nativeLogin_.reset();
+    nativeUpload_.reset();
     operation_.reset();
     WiFi.disconnect(true);
     radioStopped_ = true;
@@ -537,10 +560,15 @@ void WeReadProgressSyncActivity::loop() {
       startTimeSync();
       return;
     case State::TimeSyncing:
-    case State::Syncing:
       if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
-        operation_.cancel();
+        nativeUpload_.reset();
+        returnToReader();
+        return;
       }
+      advanceTimeSync();
+      return;
+    case State::Syncing:
+      if (mappedInput.wasReleased(MappedInputManager::Button::Back) && operation_) operation_->cancel();
       advanceSync();
       return;
     case State::ChoosingDirection: {

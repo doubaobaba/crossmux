@@ -24,6 +24,8 @@ struct Reply {
 // Per-request stages allow cancellation between requests. No background service.
 class Upload {
  public:
+  ~Upload();
+  // The ledger must outlive this workspace, including cancellation.
   bool begin(const char* bookId, WeReadTimeLedger& ledger);
   bool step(WeReadClient::Error& error);  // true = finished (success or failure)
   void diagnosticCode(char* out, size_t capacity) const;
@@ -33,7 +35,6 @@ class Upload {
   WeReadHttpClient::Session session_;
   WeReadNativeProtocol::Credentials credentials_;
   WeReadNativeProtocol::Position position_;
-  WeReadNativeProtocol::Scratch scratch_;
   Reply reply_;
   WeReadTimeLedger* ledger_ = nullptr;
   WeReadTimeLedger::Hour hours_[WeReadTimeLedger::kBatchHours];

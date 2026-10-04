@@ -2,6 +2,8 @@
 
 #include <Arduino.h>
 #include <HalStorage.h>
+#include <Logging.h>
+#include <Memory.h>
 #include <mbedtls/sha256.h>
 
 #include <cstdio>
@@ -232,6 +234,12 @@ Error Upload::request(const char* path, bool post) {
   options.readBuffer = io_;
   options.readBufferSize = sizeof(io_);
   options.diagnostic = &diagnostic_;
+  if (post) {
+    // Reserve durably immediately before the first HTTP byte. A failed wolfSSL
+    // handshake leaves the hours pending; a partial write remains uncertain.
+    options.beforeSend = [](void* context) { return static_cast<WeReadTimeLedger*>(context)->prepareBatch(); };
+    options.beforeSendContext = ledger_;
+  }
   reply_ = {};
   StreamingJsonParser parser(reply_.callbacks());
   httpStatus_ = -1;
@@ -247,6 +255,7 @@ Error Upload::request(const char* path, bool post) {
       {}, httpStatus_);
   parser.feed(" ", 1);
   parserError_ = parser.hasError();
+  if (post && !ledger_->healthy()) return Error::SdCard;
   // A verified HTTP auth rejection is decisive even if its error body is truncated.
   if (httpStatus_ == 401 || httpStatus_ == 403) return Error::SessionExpired;
   if (transportResult_ == WeReadHttpClient::Result::Aborted) return Error::Protocol;
@@ -282,6 +291,11 @@ bool Upload::resolvePosition() {
     }
   }
   return false;
+}
+Upload::~Upload() {
+  session_.reset();
+  // Cancellation after sending cannot put an uncertain batch back into pending.
+  if (ledger_ && !ledger_->quarantineBatch()) LOG_ERR("WRNative", "Failed to persist cancelled batch");
 }
 bool Upload::step(Error& error) {
   error = Error::Ok;
@@ -349,18 +363,22 @@ bool Upload::step(Error& error) {
       // Do not risk sending the only POST on a keep-alive socket closed while
       // the device was between steps. Never retry this non-idempotent request.
       session_.reset();
+      // Signing needs 3.5 KiB, too large for the task stack. Allocate only for
+      // this explicit batch, after releasing TLS, and free BEFORE reconnecting.
+      auto scratch = makeUniqueNoThrow<Scratch>();
+      if (!scratch) {
+        LOG_ERR("WRNative", "OOM: signing scratch (%u bytes)", unsigned(sizeof(Scratch)));
+        error = Error::OutOfMemory;
+        break;
+      }
       unsigned count = ledger_->batchHours(hours_, WeReadTimeLedger::kBatchHours);
       if (!batch(credentials_, bookId_, version_, position_, hours_, count, guest_, token_,
-                 TimeUtils::getCurrentValidTimestamp(), static_cast<uint32_t>(random(0, 1000)), scratch_, sha256, body_,
+                 TimeUtils::getCurrentValidTimestamp(), static_cast<uint32_t>(random(0, 1000)), *scratch, sha256, body_,
                  sizeof(body_))) {
         error = Error::Protocol;
         break;
       }
-      // Durably remove the batch from pending BEFORE the only non-idempotent request.
-      if (!ledger_->prepareBatch()) {
-        error = Error::SdCard;
-        break;
-      }
+      scratch.reset();
       error = request("/book/batchUploadProgress", true);
       if (error == Error::Ok) {
         if (!reply_.succeeded)
@@ -449,5 +467,5 @@ void Upload::saveDiagnostic(Error error) {
       file.write(reinterpret_cast<const uint8_t*>(body_), n) == size_t(n))
     file.flush();
 }
-static_assert(sizeof(Upload) <= 12 * 1024, "Native upload fixed workspace exceeds 12 KiB");
+static_assert(sizeof(Upload) <= 8 * 1024, "Native upload fixed workspace exceeds 8 KiB");
 }  // namespace WeReadNativeTime

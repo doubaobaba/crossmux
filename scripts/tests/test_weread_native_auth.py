@@ -12,7 +12,7 @@ class WeReadNativeAuthTest(unittest.TestCase):
     def test_sync_auth_gate_resume_and_expiry_recovery(self):
         source = (ROOT/'src/activities/apps/weread/webapi/WeReadProgressSyncActivity.cpp').read_text()
         methods = '\n'.join(method(source, 'void WeReadProgressSyncActivity::'+name+'(')
-                            for name in ('startSync', 'startNativeLogin', 'advanceNativeLogin', 'advanceSync'))
+                            for name in ('startSync', 'startNativeLogin', 'advanceNativeLogin', 'startTimeSync', 'advanceTimeSync', 'advanceSync'))
         compile_run(r'''
 #include <atomic>
 #include <cstdio>
@@ -24,10 +24,12 @@ class WeReadNativeAuthTest(unittest.TestCase):
 #define LOG_INF(...)
 namespace WeReadProtocol { struct RemoteProgress { float percent=0; }; }
 namespace WeReadClient {
- enum class Error { Ok, Clock, OutOfMemory, Protocol, Network, SessionExpired };
+ enum class Error { Ok, Clock, OutOfMemory, Protocol, Network, SessionExpired, SdCard };
  enum class ProgressSyncMode { Compare, UploadLocal };
  enum class ProgressSyncOutcome { Pending, SelectionRequired, ApplyRemote, AlreadySynced };
+ inline unsigned webLive=0;
  struct Operation {
+  Operation(){++webLive;}~Operation(){--webLive;}
   enum class Event { None, Authenticated, DetailReady, ChapterComplete, QrReady, Cancelled, Failed, Complete };
   struct Result { ProgressSyncOutcome outcome=ProgressSyncOutcome::AlreadySynced;WeReadProtocol::RemoteProgress remote; };
   Event event=Event::None; Error err=Error::Ok;unsigned starts=0,resets=0;
@@ -39,7 +41,17 @@ namespace WeReadClient {
 }
 using E=WeReadClient::Error;
 bool allocationFails=false,clockValid=true;
-unsigned authLive=0;
+unsigned authLive=0,uploadLive=0;
+namespace WeReadNativeTime {
+ struct Upload {
+  E err=E::Ok;bool done=true;
+  Upload(){++uploadLive;assert(!WeReadClient::webLive&&!authLive);}
+  ~Upload(){--uploadLive;}
+  template<class T> bool begin(const char*,T&){return true;}
+  bool step(E& e){e=err;return done;}
+  void diagnosticCode(char* out,size_t n){snprintf(out,n,"U6 N7 T9:-125 H200 E0 V3");}
+ };
+}
 namespace WeReadNativeAuth {
  struct Login {
   enum class Event { None, QrReady, Scanned, Complete, Failed };
@@ -48,7 +60,7 @@ namespace WeReadNativeAuth {
   Phase failurePhase() { return Phase::Qr; }
   void diagnosticCode(char* out,size_t n) { snprintf(out,n,"A3 N3 T6:-188 H-1 E0"); }
   Event event=Event::None; bool ready=true,forced=false; E err=E::Ok;
-  Login() { ++authLive; } ~Login() { --authLive; }
+  Login() { assert(!WeReadClient::webLive&&!uploadLive);++authLive; } ~Login() { --authLive; }
   bool begin(const char* account,const char* book,bool force) { assert(!strcmp(account,"123")&&!strcmp(book,"456"));forced=force;return true; }
   bool readyToStep() { return ready; } Event step(E& e) { e=err;return event; }
   const char* qrUrl() { return "https://open.weixin.qq.com/connect/confirm?uuid=test"; }
@@ -67,8 +79,9 @@ struct WeReadProgressSyncActivity {
                     TimeSyncing,TimeFailed,TimeStarting,Success,ChoosingDirection };
  enum class DirectionOption { ApplyRemote,UploadLocal };
  State state_=State::Starting; Renderer renderer;
- WeReadClient::Operation operation_;
- struct { const char* account() { return "123"; } unsigned pending=300,uncertain=0;unsigned pendingSeconds() { return pending; } } timeLedger_;
+ std::unique_ptr<WeReadClient::Operation> operation_;
+ std::unique_ptr<WeReadNativeTime::Upload> nativeUpload_;
+ struct { bool healthy(){return true;}const char* account() { return "123"; } unsigned pending=300,uncertain=0;unsigned pendingSeconds() { return pending; } } timeLedger_;
  std::unique_ptr<WeReadNativeAuth::Login> nativeLogin_;
  WeReadNativeAuth::Login::Failure authFailure_=WeReadNativeAuth::Login::Failure::None;
  WeReadNativeAuth::Login::Phase authPhase_=WeReadNativeAuth::Login::Phase::Load;
@@ -86,40 +99,45 @@ struct WeReadProgressSyncActivity {
  void launchWifiSelection() { wifiChild=true; }
  void returnToReader() { returned=true; }
  void applyRemoteProgress(const WeReadProtocol::RemoteProgress&) { state_=State::Success; }
- void startSync();void startNativeLogin();void advanceNativeLogin();void advanceSync();
+ void startSync();void startNativeLogin();void advanceNativeLogin();void advanceSync();void startTimeSync();void advanceTimeSync();
 };
 ''' + methods + r'''
 int main() {
  using S=WeReadProgressSyncActivity::State;
  using A=WeReadNativeAuth::Login;
  using O=WeReadClient::Operation;
- { WeReadProgressSyncActivity p;p.startSync();assert(p.state_==S::Authenticating&&authLive==1&&!p.operation_.starts);
+ { WeReadProgressSyncActivity p;p.startSync();assert(p.state_==S::Authenticating&&authLive==1&&!p.operation_);
    p.nativeLogin_->event=A::Event::QrReady;p.advanceNativeLogin();assert(p.state_==S::AuthQr&&p.nativeQrUrl_[0]);
    p.nativeLogin_->event=A::Event::Scanned;p.advanceNativeLogin();assert(p.state_==S::AuthScanned);
    p.nativeLogin_->event=A::Event::Complete;p.advanceNativeLogin();assert(p.state_==S::Starting&&p.nativeReady_&&!authLive);
-   p.startSync();assert(p.state_==S::Syncing&&p.operation_.starts==1&&!authLive);
-   p.operation_.event=O::Event::Complete;p.advanceSync();assert(p.state_==S::TimeStarting);
+   p.startSync();assert(p.state_==S::Syncing&&p.operation_->starts==1&&!authLive);
+   p.operation_->event=O::Event::Complete;p.advanceSync();assert(p.state_==S::TimeStarting&&!p.operation_&&!WeReadClient::webLive);
+   p.startTimeSync();assert(p.nativeUpload_&&uploadLive==1&&!WeReadClient::webLive&&!authLive);p.nativeUpload_->done=false;p.advanceTimeSync();assert(p.nativeUpload_);
+   p.timeLedger_.pending=0;p.nativeUpload_->done=true;p.advanceTimeSync();assert(p.state_==S::Success&&!uploadLive);
  }
  { WeReadProgressSyncActivity p;allocationFails=true;p.startSync();assert(p.state_==S::AuthFailed&&p.error_==E::OutOfMemory&&!authLive);allocationFails=false; }
  { WeReadProgressSyncActivity p;p.startSync();p.nativeLogin_->event=A::Event::Failed;p.nativeLogin_->err=E::Protocol;
-   p.advanceNativeLogin();assert(p.state_==S::AuthFailed&&!authLive&&!p.nativeReady_&&!p.operation_.starts);
+   p.advanceNativeLogin();assert(p.state_==S::AuthFailed&&!authLive&&!p.nativeReady_&&!p.operation_);
    assert(p.authPhase_==A::Phase::Qr && strstr(p.authDiagnostic_,"T6:-188")); }
  { WeReadProgressSyncActivity p;p.startSync();p.nativeLogin_->ready=false;
    p.advanceNativeLogin();assert(p.state_==S::Authenticating); } // Cancellation releases workspace.
  assert(!authLive);
- { WeReadProgressSyncActivity p;p.radioStopped_=true;p.startSync();assert(p.wifiChild&&!authLive&&!p.operation_.starts); }
+ { WeReadProgressSyncActivity p;p.radioStopped_=true;p.startSync();assert(p.wifiChild&&!authLive&&!p.operation_); }
  { WeReadProgressSyncActivity p;clockValid=false;p.startSync();assert(p.state_==S::Failed&&!authLive);clockValid=true; }
  // Mid-upload expiry gets exactly one automatic login; uncertain duration is not made pending again.
  { WeReadProgressSyncActivity p;p.state_=S::TimeSyncing;p.nativeReady_=true;
-   p.timeLedger_.pending=0;p.timeLedger_.uncertain=300;p.operation_.event=O::Event::Failed;p.operation_.err=E::SessionExpired;
-   p.advanceSync();assert(p.state_==S::Starting&&p.forceNativeLogin_&&p.nativeRecoveryAttempted_&&!p.nativeReady_);
+   p.startTimeSync();p.timeLedger_.pending=0;p.timeLedger_.uncertain=300;p.nativeUpload_->err=E::SessionExpired;
+   p.advanceTimeSync();assert(p.state_==S::Starting&&p.forceNativeLogin_&&p.nativeRecoveryAttempted_&&!p.nativeReady_);
    assert(p.timeLedger_.pending==0&&p.timeLedger_.uncertain==300);
    p.startSync();assert(p.nativeLogin_->forced);
    p.nativeLogin_->event=A::Event::Complete;p.advanceNativeLogin();assert(!authLive);
-   p.state_=S::TimeSyncing;p.advanceSync();assert(p.state_==S::TimeFailed&&!authLive);assert(strstr(p.timeDiagnostic_,"U6 N7"));
+   p.nativeUpload_=std::make_unique<WeReadNativeTime::Upload>();p.nativeUpload_->err=E::SessionExpired;p.state_=S::TimeSyncing;p.advanceTimeSync();assert(p.state_==S::TimeFailed&&!authLive);assert(strstr(p.timeDiagnostic_,"U6 N7"));
  }
+ { WeReadProgressSyncActivity p;p.nativeReady_=true;allocationFails=true;p.startSync();assert(p.state_==S::Failed&&!p.operation_);allocationFails=false; }
+ { WeReadProgressSyncActivity p;allocationFails=true;p.startTimeSync();assert(p.state_==S::TimeFailed&&!p.nativeUpload_);allocationFails=false; }
+ assert(!authLive&&!uploadLive&&!WeReadClient::webLive);
  // Web-session expiry still uses its own login path; native QR cannot replace Web cookies.
- { WeReadProgressSyncActivity p;p.state_=S::Syncing;p.operation_.event=O::Event::Failed;p.operation_.err=E::SessionExpired;
+ { WeReadProgressSyncActivity p;p.state_=S::Syncing;p.operation_=std::make_unique<O>();p.operation_->event=O::Event::Failed;p.operation_->err=E::SessionExpired;
    p.advanceSync();assert(p.state_==S::LoginRequired&&!p.nativeRecoveryAttempted_); }
 }
 ''')
@@ -150,7 +168,7 @@ bool online=true;int fault=0;unsigned tick=0;
 unsigned millis(){return ++tick;}void delay(unsigned n){tick+=n;}
 struct { int getMode(){return online?1:0;}int status(){return online?1:0;} } WiFi;
 struct { unsigned getFreeHeap(){return 50000;}unsigned getMaxAllocHeap(){return 24000;} } ESP;
-std::string wire;
+std::string wire;unsigned writes=0,gates=0;bool gateOk=true;
 namespace freeink {
  struct SecureClient {
   size_t offset=0;bool active=false;int stage=0,err=0;
@@ -158,7 +176,7 @@ namespace freeink {
   void setTimeout(unsigned){}bool connect(const char*,uint16_t){offset=0;if(fault==1){stage=6;err=-188;return false;}return active=true;}
   bool connected(){return active&&offset<wire.size();}void stop(){active=false;}
   int available(){return active?wire.size()-offset:0;}
-  size_t write(const uint8_t*,size_t n){if(fault==2){stage=8;err=-125;return 0;}return n;}
+  size_t write(const uint8_t*,size_t n){++writes;if(fault==2){stage=8;err=-125;return 0;}return n;}
   int read(){return connected()?static_cast<unsigned char>(wire[offset++]):-1;}
   int read(uint8_t* b,size_t n){if(!connected())return -1;n=std::min(n,wire.size()-offset);memcpy(b,wire.data()+offset,n);offset+=n;return n;}
   unsigned lastErrorStage(){return stage;}int lastError(){return err;}int firstHandshakeError(){return fault==1?-125:0;}
@@ -184,7 +202,14 @@ int main(){
  fault=2;assert(run(accept)==Result::NetworkError&&d.stage==RequestStage::Write&&d.tlsError==-125);
  fault=0;wire="";assert(run(accept)==Result::NetworkError&&d.stage==RequestStage::Status);
  wire="HTTP/1.1 200 OK\r\nContent-Length:";assert(run(accept)==Result::NetworkError&&status==200&&d.stage==RequestStage::Headers);
- online=false;assert(run(accept)==Result::NetworkError&&status==-1&&d.stage==RequestStage::Wifi&&d.tlsError==0);
+ wire="HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}";
+ o.beforeSend=[](void* ctx){assert(ctx==&gateOk);assert(writes==0);++gates;return gateOk;};o.beforeSendContext=&gateOk;
+ fault=1;writes=gates=0;assert(run(accept)==Result::NetworkError&&!gates&&!writes);
+ fault=0;gateOk=false;assert(run(accept)==Result::Aborted&&gates==1&&!writes);
+ gateOk=true;gates=0;assert(run(accept)==Result::Ok&&gates==1&&writes>0);
+ fault=2;writes=gates=0;assert(run(accept)==Result::NetworkError&&gates==1&&writes==1);
+ writes=gates=0;
+ online=false;assert(run(accept)==Result::NetworkError&&status==-1&&d.stage==RequestStage::Wifi&&d.tlsError==0&&!writes&&!gates);
 }
 """)
 
