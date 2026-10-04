@@ -93,3 +93,5 @@ gtest_discover_tests(WeReadTimeLedgerTest PROPERTIES RUN_SERIAL TRUE)
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 add_test(NAME WeReadTimePayloadAndRetry
   COMMAND ${Python3_EXECUTABLE} ${REPO_ROOT}/scripts/tests/test_weread_time_sync.py)
+add_test(NAME WeReadNativeAuthLifecycle
+  COMMAND ${Python3_EXECUTABLE} ${REPO_ROOT}/scripts/tests/test_weread_native_auth.py)

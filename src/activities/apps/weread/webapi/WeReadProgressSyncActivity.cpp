@@ -33,6 +33,7 @@
 #include "components/SubpageLayout.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "util/QrUtils.h"
 #include "util/TimeUtils.h"
 
 namespace {
@@ -109,6 +110,7 @@ void WeReadProgressSyncActivity::onEnter() {
 }
 
 void WeReadProgressSyncActivity::onExit() {
+  nativeLogin_.reset();
   operation_.reset();
   Activity::onExit();
   if (!wifiActivated_) return;
@@ -119,7 +121,8 @@ void WeReadProgressSyncActivity::onExit() {
 
 bool WeReadProgressSyncActivity::preventAutoSleep() {
   return state_ == State::Starting || state_ == State::Syncing || state_ == State::TimeStarting ||
-         state_ == State::TimeSyncing;
+         state_ == State::TimeSyncing || state_ == State::Authenticating || state_ == State::AuthQr ||
+         state_ == State::AuthScanned;
 }
 
 void WeReadProgressSyncActivity::launchWifiSelection() {
@@ -162,6 +165,10 @@ void WeReadProgressSyncActivity::startSync() {
     requestUpdate();
     return;
   }
+  if (timeReady_ && !nativeReady_) {
+    startNativeLogin();
+    return;
+  }
   if (!operation_.beginProgressSync(bookId_, input_, syncMode_)) {
     error_ = operation_.error();
     state_ = error_ == WeReadClient::Error::SessionExpired ? State::LoginRequired : State::Failed;
@@ -169,6 +176,59 @@ void WeReadProgressSyncActivity::startSync() {
     return;
   }
   state_ = State::Syncing;
+  requestUpdate();
+}
+
+void WeReadProgressSyncActivity::startNativeLogin() {
+  operation_.reset();
+  authFailure_ = WeReadNativeAuth::Login::Failure::None;
+  nativeQrUrl_[0] = 0;
+  // <8 KiB fixed workspace cannot fit the activity task stack. Released before
+  // Web sync or the separate native upload allocation; no background worker.
+  nativeLogin_ = makeUniqueNoThrow<WeReadNativeAuth::Login>();
+  if (!nativeLogin_) {
+    LOG_ERR("WRSync", "OOM: native login (%u bytes)", unsigned(sizeof(WeReadNativeAuth::Login)));
+    error_ = WeReadClient::Error::OutOfMemory;
+    state_ = State::AuthFailed;
+  } else if (!nativeLogin_->begin(timeLedger_.account(), bookId_, forceNativeLogin_)) {
+    nativeLogin_.reset();
+    error_ = WeReadClient::Error::Protocol;
+    state_ = State::AuthFailed;
+  } else {
+    state_ = State::Authenticating;
+  }
+  requestUpdate();
+}
+
+void WeReadProgressSyncActivity::advanceNativeLogin() {
+  if (!nativeLogin_ || !nativeLogin_->readyToStep()) return;
+  RenderLock renderBarrier(*this);
+  if (auto* fontCache = renderer.getFontCacheManager()) fontCache->clearCache();
+  const auto event = nativeLogin_->step(error_);
+  switch (event) {
+    case WeReadNativeAuth::Login::Event::None:
+      return;
+    case WeReadNativeAuth::Login::Event::QrReady:
+      strncpy(nativeQrUrl_, nativeLogin_->qrUrl(), sizeof(nativeQrUrl_) - 1);
+      state_ = State::AuthQr;
+      fullRefreshPending_.store(true);
+      break;
+    case WeReadNativeAuth::Login::Event::Scanned:
+      state_ = State::AuthScanned;
+      break;
+    case WeReadNativeAuth::Login::Event::Complete:
+      nativeReady_ = true;
+      forceNativeLogin_ = false;
+      nativeLogin_.reset();
+      state_ = State::Starting;
+      fullRefreshPending_.store(true);
+      break;
+    case WeReadNativeAuth::Login::Event::Failed:
+      authFailure_ = nativeLogin_->failure();
+      nativeLogin_.reset();
+      state_ = State::AuthFailed;
+      break;
+  }
   requestUpdate();
 }
 
@@ -205,6 +265,17 @@ void WeReadProgressSyncActivity::advanceSync() {
       return;
     case WeReadClient::Operation::Event::Failed:
       error_ = operation_.error();
+      if (state_ == State::TimeSyncing && error_ == WeReadClient::Error::SessionExpired && !nativeRecoveryAttempted_) {
+        // Upload has already quarantined any attempted batch. Re-authentication
+        // can resume only unattempted hours, never replay the uncertain request.
+        operation_.reset();
+        nativeRecoveryAttempted_ = true;
+        nativeReady_ = false;
+        forceNativeLogin_ = true;
+        state_ = State::Starting;
+        requestUpdate();
+        return;
+      }
       state_ = state_ == State::TimeSyncing
                    ? State::TimeFailed
                    : (error_ == WeReadClient::Error::SessionExpired ? State::LoginRequired : State::Failed);
@@ -365,6 +436,18 @@ const char* WeReadProgressSyncActivity::resultMessage() const {
 }
 
 const char* WeReadProgressSyncActivity::errorMessage() const {
+  if (state_ == State::AuthFailed) {
+    switch (authFailure_) {
+      case WeReadNativeAuth::Login::Failure::AccountMismatch:
+        return tr(STR_WEREAD_NATIVE_WRONG_ACCOUNT);
+      case WeReadNativeAuth::Login::Failure::Expired:
+        return tr(STR_WEREAD_NATIVE_QR_EXPIRED);
+      case WeReadNativeAuth::Login::Failure::Declined:
+        return tr(STR_WEREAD_NATIVE_QR_DECLINED);
+      case WeReadNativeAuth::Login::Failure::None:
+        break;
+    }
+  }
   switch (error_) {
     case WeReadClient::Error::Unavailable:
       return tr(STR_WEREAD_PROGRESS_UNAVAILABLE);
@@ -375,7 +458,8 @@ const char* WeReadProgressSyncActivity::errorMessage() const {
     case WeReadClient::Error::Clock:
       return tr(STR_CLOCK_SYNC_FAIL);
     case WeReadClient::Error::SessionExpired:
-      return state_ == State::TimeFailed ? tr(STR_WEREAD_NATIVE_LOGIN_REQUIRED) : tr(STR_WEREAD_LOGIN_REQUIRED);
+      return state_ == State::TimeFailed || state_ == State::AuthFailed ? tr(STR_WEREAD_NATIVE_LOGIN_REQUIRED)
+                                                                        : tr(STR_WEREAD_LOGIN_REQUIRED);
     case WeReadClient::Error::Ok:
     case WeReadClient::Error::Cancelled:
     case WeReadClient::Error::LoginFailed:
@@ -390,7 +474,8 @@ const char* WeReadProgressSyncActivity::errorMessage() const {
 void WeReadProgressSyncActivity::loop() {
   if (!radioStopped_ && wifiActivated_ &&
       (state_ == State::Success || state_ == State::TimeFailed || state_ == State::Failed ||
-       state_ == State::LoginRequired)) {
+       state_ == State::LoginRequired || state_ == State::AuthFailed)) {
+    nativeLogin_.reset();
     operation_.reset();
     WiFi.disconnect(true);
     radioStopped_ = true;
@@ -400,6 +485,24 @@ void WeReadProgressSyncActivity::loop() {
       return;
     case State::Starting:
       startSync();
+      return;
+    case State::Authenticating:
+    case State::AuthQr:
+    case State::AuthScanned:
+      if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+        returnToReader();
+        return;
+      }
+      advanceNativeLogin();
+      return;
+    case State::AuthFailed:
+      if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+        returnToReader();
+      } else if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+        nativeReady_ = false;
+        state_ = State::Starting;
+        requestUpdate();
+      }
       return;
     case State::TimeStarting:
       if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
@@ -499,6 +602,30 @@ void WeReadProgressSyncActivity::render(RenderLock&&) {
   const int titleHeight = renderer.getLineHeight(UI_12_FONT_ID);
 
   switch (state_) {
+    case State::Authenticating:
+      UITheme::drawCenteredWrappedText(renderer, textBounds, UI_10_FONT_ID, tr(STR_WEREAD_NATIVE_CHECKING), 2, true,
+                                       EpdFontFamily::BOLD);
+      break;
+    case State::AuthQr:
+    case State::AuthScanned: {
+      const int lineHeight = renderer.getLineHeight(UI_10_FONT_ID);
+      const int gap = metrics.verticalSpacing;
+      const int qrSide = std::max(1, std::min(content.width * 4 / 5, content.height - gap - lineHeight * 3));
+      const int qrY = content.y + std::max(0, (content.height - qrSide - gap - lineHeight * 3) / 2);
+      QrUtils::drawQrCode(renderer, Rect{content.x + (content.width - qrSide) / 2, qrY, qrSide, qrSide}, nativeQrUrl_);
+      UITheme::drawCenteredText(
+          renderer, textBounds, UI_10_FONT_ID, qrY + qrSide + gap,
+          state_ == State::AuthScanned ? tr(STR_WEREAD_NATIVE_CONFIRM_PHONE) : tr(STR_WEREAD_SCAN_LOGIN));
+      UITheme::drawCenteredText(renderer, textBounds, UI_10_FONT_ID, qrY + qrSide + gap + lineHeight,
+                                tr(STR_WEREAD_NATIVE_SAME_ACCOUNT));
+      UITheme::drawCenteredText(renderer, textBounds, UI_10_FONT_ID, qrY + qrSide + gap + lineHeight * 2,
+                                tr(STR_WEREAD_NATIVE_AUTO_CONTINUE));
+      break;
+    }
+    case State::AuthFailed:
+      UITheme::drawCenteredWrappedText(renderer, textBounds, UI_10_FONT_ID, errorMessage(), 3, true,
+                                       EpdFontFamily::BOLD);
+      break;
     case State::WifiSelection:
     case State::Starting:
     case State::Syncing:
@@ -583,8 +710,12 @@ void WeReadProgressSyncActivity::render(RenderLock&&) {
   if (state_ == State::ChoosingDirection) {
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
-  } else if (state_ == State::TimeStarting || state_ == State::TimeSyncing) {
+  } else if (state_ == State::Authenticating || state_ == State::AuthQr || state_ == State::AuthScanned ||
+             state_ == State::TimeStarting || state_ == State::TimeSyncing) {
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
+    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+  } else if (state_ == State::AuthFailed) {
+    const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_RETRY), "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   } else if (state_ == State::TimeFailed) {
     const bool retryable = timeReady_ && timeLedger_.healthy() && timeLedger_.pendingSeconds() &&

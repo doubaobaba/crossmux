@@ -7,6 +7,8 @@ namespace WeReadClient {
 enum class Error;
 }
 namespace WeReadNativeTime {
+const char* rootCA();
+bool hash256(const uint8_t* data, size_t size, char out[65]);
 struct Reply {
   WeReadNativeProtocol::Credentials credentials;
   WeReadNativeProtocol::Position position;

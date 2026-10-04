@@ -181,6 +181,8 @@ bool sha256(const uint8_t* data, size_t size, char out[65]) {
   return true;
 }
 }  // namespace
+const char* rootCA() { return kRootCA; }
+bool hash256(const uint8_t* data, size_t size, char out[65]) { return sha256(data, size, out); }
 JsonCallbacks Reply::callbacks() {
   return {this, onKey, value, value, nullptr, nullptr, start, end, start, end, chunks};
 }

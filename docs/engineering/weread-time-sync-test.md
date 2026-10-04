@@ -1,7 +1,7 @@
 # Native offline reading-time sync test build
 
-Base `c92edca422bc2a3087e22c2d47956e562ae1006e`, SDK
-`094976e1d47ad7120cf461fec5f6b737eaabf13f`; version `1.6.0-time-test2`.
+Test3 base `ab101542b7fbbc63a749b0ec5b889f68c1b78be6`, pinned SDK
+`4d1f1e013955213ff14b57b001547d73d4b33b0f`; version `1.6.0-time-test3`.
 X3/X4 ESP32-C3 `gh_release`; original partitions and SD updater.
 
 ## Evidence
@@ -56,16 +56,45 @@ server behavior. The sample is journaled as credited and must not be repeated.
   to the reader retains the existing silent restart that releases network memory.
   No new task, timer, periodic Wi-Fi wakeup or per-second SD write is introduced.
 
-## Test login import
+## On-device native login (test3)
 
-The test build reads `/.crosspoint/weread/native-session.json` on the SD card.
-Its JSON contains `vid`, `accessToken`, `deviceId`, `installId` (optional
-`refreshToken` is parsed but not used). These come from the independent native
-QR login, not the Web cookie. Native vid must match the currently signed-in Web
-account and ledger owner. This personal file must never be shared with a build.
-A missing, mismatched or expired native session fails without posting and asks
-for re-import. In-device native QR login and automatic token renewal are NOT
-implemented in this test build; re-import a fresh desktop login when needed.
+The current-book **Sync Progress** screen validates a saved native session before
+starting Web progress sync. It reads `/.crosspoint/weread/native-session.json`;
+test2 imports remain compatible. The file is separate from the firmware image.
+With a missing, corrupt, mismatched or expired native session, X3 displays a
+WeChat QR code in this same screen. Scan with the account used by the existing
+WeRead shelf, confirm on the phone, and sync resumes automatically after saving.
+Ordinary Web shelf login remains separate: its cookies cannot be substituted by
+a native access token. A missing/expired Web session still uses Apps > WeRead.
+
+The device fetches `/wxticket`, requests the official SDK QR endpoint, polls
+`long.open.weixin.qq.com` while the QR screen is visible, and exchanges the code
+at `/login`. These are the same requests as the previously verified desktop
+probe. Native `vid` must equal the current shelf/ledger owner before saving.
+A different account is rejected without overwriting the previous session or
+submitting reading data. The saved file contains only `vid`, `accessToken`,
+`deviceId`, `installId`; refresh tokens are not persisted or used.
+
+QR lifetime is bounded to five minutes. Poll reads time out after six seconds
+and wait at least 1.5 seconds between requests. Returning cancels at the next
+request boundary; no background worker continues polling. QR expiry, declined
+login and network/storage failure offer Back/Retry. Login failure is terminal
+for that authorization code. New login requires a new attempt, not a hidden
+retry of the exchange. A native expiry during time upload gets at most one
+automatic re-login per sync visit. Existing uncertain batches remain quarantined.
+
+Saving writes and flushes a `.part` file, verifies its exact bytes, then uses the
+existing backup-and-rename replacement. If interrupted between renames, loading
+recovers the previous `.bak` session. Read-back must succeed before sync resumes.
+This is recovery against common interrupted-write cases, not a guarantee against
+arbitrary FAT/SD corruption. Sessions, backups and temporary copies are ignored
+by Git and must never be published. Already-saved reading ledgers are unchanged.
+
+The test3 native login workspace, including its streaming parser, is capped at
+8 KiB and allocated with checked nothrow allocation only during manual sync.
+It is freed before Web sync or the separate native upload workspace is created.
+Existing verified sessions add one read-only native progress check; they do not
+trigger QR login or write session data. There are no periodic background renewals.
 
 ## TLS
 
@@ -97,20 +126,22 @@ credit and physical UI/heap/power remain acceptance tests, not host-test claims.
 
 ## Device acceptance
 
-1. Back up SD (including hidden `.crosspoint`). Import the personal native session
-   separately; copy test2 `update.bin` and use the working CrossMux SD updater.
-2. Confirm About shows `1.6.0-time-test2`. Connect once and verify clock/date before
+1. Back up SD (including hidden `.crosspoint`). Copy test3 `update.bin` and use
+   the working CrossMux SD updater. Preserve existing books, sessions and ledgers.
+2. Confirm About shows `1.6.0-time-test3`. Connect once and verify clock/date before
    reading offline. Compare the phone's starting book/day time.
 3. Read a NEW short session, with normal manual page turns. Open Sync Progress,
-   resolve direction if asked, and wait for the short network sequence.
+   scan/confirm if prompted, resolve direction if asked, and wait for the network
+   sequence. Repeat with a valid saved session: no QR should appear.
 4. Check submitted/pending/uncertain counters and refresh the phone's statistics.
    Repeat sync without more reading: previously acknowledged time must not recur.
 5. Verify sleep/resume, normal reading/fonts, return to reader, Wi-Fi shutdown,
    heap stability and battery. Do not deliberately interrupt an SD write.
 6. Separately test across an hour and midnight, documenting server attribution.
 
-Rollback uses the preserved working CrossMux 1.6.0 `update.bin` in the same SD
-menu. Test2 does not migrate normal progress/books/Web sessions/local statistics.
+Rollback uses the preserved test2 or working CrossMux 1.6.0 `update.bin` in the
+same SD menu. Test3 does not migrate normal progress/books/Web sessions/local
+statistics or the WRTM v2 hourly ledger; test2 pending time remains pending.
 The withdrawn test1 v1 outbox is deliberately not migrated because it contains
 no reliable hourly dates.
 
@@ -138,24 +169,35 @@ a local override to CMake 3.31.10. Machine-specific overrides and build products
 are intentionally untracked; see [build-system.md](build-system.md).
 
 For SD installation, copy `.pio/build/gh_release/firmware.bin` as `update.bin`.
-The previously compiled test image is 6,210,704 bytes (OTA slot: 6,553,600 bytes),
+The previously compiled test2 image is 6,210,704 bytes (OTA slot: 6,553,600 bytes),
 SHA-256 `cf1adb529afe2e5376b33574713354a422434aed2d8cdfdde8b0d3abacd151da`.
 Build timestamps/toolchains can change binary hashes; this identifies the
-existing test artifact, not a reproducible-build guarantee.
+previous test2 artifact, not test3 or a reproducible-build guarantee. Test3 size
+and checksum are recorded in its separate build manifest.
 
 Validation completed before publishing: 96 targeted CTest cases (including
 three native protocol test groups), four reading UI regression cases, signature
 fixtures, image checksum, OTA size, and patch reconstruction. The broader suite
 passed 567/568; its macOS compiler-header-path failure was checked separately
-with `/usr/bin/c++` for both variants. Physical X3, battery and cross-day checks
-remain the device acceptance steps above.
+with `/usr/bin/c++` for both variants. The owner subsequently reported successful test2 time synchronization on X3.
+Test3 passes 98 targeted CTest entries (including three login test groups and
+four reading UI checks). It adds host fault-injection coverage for the actual login state machine,
+protocol parsing/signing, session replacement and Activity resume/recovery.
+Test3 QR operation, physical heap/battery and cross-day attribution still need
+device acceptance; no new duration was submitted during development.
 
 ### 中文测试提示
 
 拉取时务必选择 `codex/weread-time-sync`，并带上子模块。版本应显示
-`1.6.0-time-test2`。卡上的私人 `native-session.json` 需单独保留；仓库不包含
-账号凭据，固件也不会自动生成这份原生登录文件。
+`1.6.0-time-test3`。凭证一直是独立保存在 SD 卡里的，不在固件或仓库中。
+第一次同步或凭证过期时，会在 X3 上显示二维码；使用当前书架对应的微信账号
+扫码并确认，设备保存后自动继续。有效凭证会直接复用，不需要每次扫码。
 
-先正常翻页阅读新的 2–3 分钟，再按原来的“同步进度”。先处理进度方向，随后
-自动同步当前书的待传时长。每批最多包含 16 个有阅读记录的小时，不需要等待
-相同长度的阅读时间。核对手机统计后，不再阅读并重复同步，确认不会重复计时。
+升级保留现有书籍、进度和 WRTM v2 待同步记录。按每本书原来的“同步进度”分别
+补传；每批最多包含 16 个有阅读记录的小时，不需要等待同等长度的阅读时间。
+未知日期、结果不确定的旧批次仍不会自动重传。云端能否接收较早日期以及按天
+如何入账，以手机端核对为准；保留卡上记录不等于保证云端接受全部历史时长。
+
+首次实测核对：过期凭证出现二维码；确认后继续同步；重启后再次同步无需扫码；
+不继续阅读而重复同步不会重复计时。二维码页返回、过期后重试以及扫错账号都应
+保留待同步时长。不要为了测试而清空 `.crosspoint` 或删除时长目录。

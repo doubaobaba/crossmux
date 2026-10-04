@@ -1,5 +1,6 @@
 #pragma once
 
+#include <WeReadNativeAuth.h>
 #include <WeReadTimeLedger.h>
 
 #include <atomic>
@@ -31,6 +32,10 @@ class WeReadProgressSyncActivity final : public Activity {
   enum class State : uint8_t {
     WifiSelection,
     Starting,
+    Authenticating,
+    AuthQr,
+    AuthScanned,
+    AuthFailed,
     Syncing,
     ChoosingDirection,
     TimeStarting,
@@ -51,6 +56,12 @@ class WeReadProgressSyncActivity final : public Activity {
   WeReadTimeLedger timeLedger_;
   uint64_t acceptedAtStart_ = 0;
   bool timeReady_ = false;
+  std::unique_ptr<WeReadNativeAuth::Login> nativeLogin_;
+  WeReadNativeAuth::Login::Failure authFailure_ = WeReadNativeAuth::Login::Failure::None;
+  bool nativeReady_ = false;
+  bool nativeRecoveryAttempted_ = false;
+  bool forceNativeLogin_ = false;
+  char nativeQrUrl_[256] = {};
   WeReadClient::Error error_ = WeReadClient::Error::Ok;
   WeReadClient::ProgressSyncMode syncMode_ = WeReadClient::ProgressSyncMode::Compare;
   WeReadClient::ProgressSyncOutcome outcome_ = WeReadClient::ProgressSyncOutcome::Pending;
@@ -70,6 +81,8 @@ class WeReadProgressSyncActivity final : public Activity {
   void launchWifiSelection();
   void onWifiSelectionComplete(bool connected);
   void startSync();
+  void startNativeLogin();
+  void advanceNativeLogin();
   void advanceSync();
   void beginSelectedDirection();
   void startTimeSync();

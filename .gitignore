@@ -29,7 +29,7 @@ lib/EpdFont/scripts/output/
 weread_apikey*.txt
 weread_apikey*.bin
 # Native WeRead session imports contain private account credentials.
-native-session.json
+native-session.json*
 
 /managed_components
 /.dummy

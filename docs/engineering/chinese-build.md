@@ -154,14 +154,15 @@ enter/report and position read-back. In the time-sync test build, successful
 position sync is followed by a separate duration stage, including equal-position
 and apply-remote outcomes. The native endpoint batches up to 16 occupied hours
 without proportional waiting, using a separate account-matched native login
-import and WRTM v2 ledger. It preserves freshly fetched cloud position, reserves
+and WRTM v2 ledger. It preserves freshly fetched cloud position, reserves
 before POST, and verifies book time after explicit acknowledgement. Ambiguous
 results are never replayed; remaining unattempted time can be retried. Wi-Fi is
 turned off on results. No historical totals are imported. A real desktop
 300-second sample was credited; X3 runtime, battery, larger backlogs and cross-day
 server attribution still require testing. See
-[the test implementation notes](weread-time-sync-test.md). Native login import
-must be renewed separately when expired; ordinary Web login still uses Apps.
+[the test implementation notes](weread-time-sync-test.md). Test3 checks the native session from the sync screen and opens an on-device QR
+login when missing or expired, then saves it and resumes. Ordinary Web login
+still uses Apps.
 
 For a new standard-book cache, the downloader fetches cloud progress after the
 `WRT2` catalog and before any chapter or image. This request is best effort:

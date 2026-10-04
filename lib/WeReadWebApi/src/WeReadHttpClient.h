@@ -33,6 +33,7 @@ struct RequestOptions {
   const Header* headers = nullptr;
   size_t headerCount = 0;
   int timeoutMs = 60000;
+  bool redactUrl = false;        // Login URLs contain temporary QR/session material.
   const char* rootCA = nullptr;  // Optional verified trust root; native time sync requires it.
   uint8_t* readBuffer = nullptr;
   size_t readBufferSize = 0;

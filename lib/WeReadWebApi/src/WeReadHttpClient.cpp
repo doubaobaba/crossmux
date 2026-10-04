@@ -645,7 +645,8 @@ Result request(Session& session, const char* url, const RequestOptions& options,
     session.reset();  // Never reuse an unverified connection for a verified request.
     session.rootCA_ = options.rootCA;
   }
-  LOG_DBG("HTTP", "%s %s", options.method ? options.method : "?", url ? url : "?");
+  LOG_DBG("HTTP", "%s %s", options.method ? options.method : "?",
+          options.redactUrl ? "[login URL redacted]" : (url ? url : "?"));
   return runRequest(url, options, onData, onHeader, status, session.client_, session.host_, sizeof(session.host_),
                     session.newConnections_, session.reusedRequests_);
 }
