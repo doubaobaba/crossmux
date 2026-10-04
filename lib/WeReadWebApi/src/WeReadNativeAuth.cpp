@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <HalStorage.h>
+#include <Logging.h>
 #include <esp_random.h>
 
 #include <cstdio>
@@ -100,29 +101,61 @@ Error Login::request(const char* url, bool authenticated, bool post, int timeout
   options.rootCA = WeReadNativeTime::rootCA();
   options.readBuffer = io_;
   options.readBufferSize = sizeof(io_);
+  options.diagnostic = &diagnostic_;
   reply_ = {};
   parser_.reset();
-  int status = 0;
-  size_t received = 0;
-  const auto result = WeReadHttpClient::request(
+  httpStatus_ = 0;
+  received_ = 0;
+  transportResult_ = WeReadHttpClient::request(
       session_, url, options,
       [&](const uint8_t* data, size_t length) {
-        received += length;
-        if (received > 128 * 1024) return false;
+        received_ += length;
+        if (received_ > 128 * 1024) return false;
         parser_.feed(reinterpret_cast<const char*>(data), length);
         return !parser_.hasError() && !reply_.invalid;
       },
-      {}, status);
+      {}, httpStatus_);
   parser_.feed(" ", 1);
-  if (result != WeReadHttpClient::Result::Ok) {
+  if (httpStatus_ == 401 || httpStatus_ == 403) {
     session_.reset();
-    return Error::Network;
-  }
-  if (status == 401 || status == 403 || reply_.errorCode == -2010 || reply_.errorCode == -2012)
     return Error::SessionExpired;
-  if (status != 200 || parser_.hasError() || reply_.invalid || !reply_.closed || reply_.errorCode)
+  }
+  if (transportResult_ != WeReadHttpClient::Result::Ok) {
+    session_.reset();
+    return transportResult_ == WeReadHttpClient::Result::Aborted ? Error::Protocol : Error::Network;
+  }
+  if (!parser_.hasError() && !reply_.invalid && reply_.closed &&
+      (reply_.errorCode == -2010 || reply_.errorCode == -2012))
+    return Error::SessionExpired;
+  if (httpStatus_ != 200 || parser_.hasError() || reply_.invalid || !reply_.closed || reply_.errorCode)
     return Error::Protocol;
   return Error::Ok;
+}
+void Login::diagnosticCode(char* out, size_t capacity) const {
+  snprintf(out, capacity, "A%u N%u T%u:%d H%d E%d", unsigned(failurePhase_), unsigned(diagnostic_.stage),
+           unsigned(diagnostic_.tlsStage), diagnostic_.tlsError, httpStatus_, reply_.errorCode);
+}
+void Login::saveDiagnostic(Error error) {
+  // Reuse the existing request workspace. One small overwrite per terminal
+  // failure; no writes on polling timeouts, and no credentials/account/book IDs.
+  const int size = snprintf(
+      body_, sizeof(body_),
+      "version=%s\nutc=%lu\nauth_phase=%u\nerror=%u\nhttp_stage=%u\nhttp_status=%d\n"
+      "transport_result=%u\ntls_stage=%u\ntls_error=%d\nfirst_tls_error=%d\n"
+      "received=%u\napi_error=%d\njson_error=%u\ninvalid=%u\nclosed=%u\n"
+      "free_before=%lu\nlargest_before=%lu\nfree_after=%lu\nlargest_after=%lu\n",
+      CROSSPOINT_VERSION, static_cast<unsigned long>(TimeUtils::getCurrentValidTimestamp()), unsigned(failurePhase_),
+      unsigned(error), unsigned(diagnostic_.stage), httpStatus_, unsigned(transportResult_),
+      unsigned(diagnostic_.tlsStage), diagnostic_.tlsError, diagnostic_.firstTlsError, unsigned(received_),
+      reply_.errorCode, parser_.hasError(), reply_.invalid, reply_.closed,
+      static_cast<unsigned long>(diagnostic_.freeBefore), static_cast<unsigned long>(diagnostic_.largestBefore),
+      static_cast<unsigned long>(diagnostic_.freeAfter), static_cast<unsigned long>(diagnostic_.largestAfter));
+  if (!fits(size, sizeof(body_)) || !WeReadStore::ensureRoot()) return;
+  HalFile file;
+  if (!Storage.openFileForWrite("WRAuth", "/.crosspoint/weread/native-auth-error.txt", file)) return;
+  if (file.write(reinterpret_cast<const uint8_t*>(body_), size) != static_cast<size_t>(size))
+    LOG_ERR("WRAuth", "Diagnostic write failed");
+  file.flush();
 }
 bool Login::readyToStep() const {
   return phase_ != Phase::Poll || static_cast<int32_t>(millis() - nextPoll_) >= 0 ||
@@ -258,6 +291,8 @@ Login::Event Login::step(Error& error) {
       return Event::Failed;
   }
   session_.reset();
+  failurePhase_ = phase_;
+  saveDiagnostic(error);
   phase_ = Phase::Failed;
   terminalError_ = error;
   return Event::Failed;

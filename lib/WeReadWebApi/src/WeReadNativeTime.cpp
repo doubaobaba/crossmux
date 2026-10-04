@@ -244,8 +244,12 @@ Error Upload::request(const char* path, bool post) {
       },
       {}, status);
   parser.feed(" ", 1);
+  // A verified HTTP auth rejection is decisive even if its error body is truncated.
+  if (status == 401 || status == 403) return Error::SessionExpired;
+  if (result == WeReadHttpClient::Result::Aborted) return Error::Protocol;
   if (result != WeReadHttpClient::Result::Ok) return Error::Network;
-  if (status == 401 || status == 403 || reply_.errorCode == -2012 || reply_.errorCode == -2010)
+  if (!parser.hasError() && !reply_.invalid && reply_.closed &&
+      (reply_.errorCode == -2012 || reply_.errorCode == -2010))
     return Error::SessionExpired;
   if (status != 200 || parser.hasError() || reply_.invalid || !reply_.closed || reply_.errorCode)
     return Error::Protocol;

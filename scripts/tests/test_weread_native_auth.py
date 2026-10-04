@@ -15,6 +15,7 @@ class WeReadNativeAuthTest(unittest.TestCase):
                             for name in ('startSync', 'startNativeLogin', 'advanceNativeLogin', 'advanceSync'))
         compile_run(r'''
 #include <atomic>
+#include <cstdio>
 #include <cassert>
 #include <cstring>
 #include <memory>
@@ -42,6 +43,9 @@ namespace WeReadNativeAuth {
  struct Login {
   enum class Event { None, QrReady, Scanned, Complete, Failed };
   enum class Failure { None, AccountMismatch };
+  enum class Phase { Load, Verify, Ticket, Qr, Poll, Exchange, Save, Done, Failed };
+  Phase failurePhase() { return Phase::Qr; }
+  void diagnosticCode(char* out,size_t n) { snprintf(out,n,"A3 N3 T6:-188 H-1 E0"); }
   Event event=Event::None; bool ready=true,forced=false; E err=E::Ok;
   Login() { ++authLive; } ~Login() { --authLive; }
   bool begin(const char* account,const char* book,bool force) { assert(!strcmp(account,"123")&&!strcmp(book,"456"));forced=force;return true; }
@@ -66,6 +70,8 @@ struct WeReadProgressSyncActivity {
  struct { const char* account() { return "123"; } unsigned pending=300,uncertain=0;unsigned pendingSeconds() { return pending; } } timeLedger_;
  std::unique_ptr<WeReadNativeAuth::Login> nativeLogin_;
  WeReadNativeAuth::Login::Failure authFailure_=WeReadNativeAuth::Login::Failure::None;
+ WeReadNativeAuth::Login::Phase authPhase_=WeReadNativeAuth::Login::Phase::Load;
+ char authDiagnostic_[96]={};
  bool radioStopped_=false,timeReady_=true,nativeReady_=false,forceNativeLogin_=false,nativeRecoveryAttempted_=false;
  bool wifiChild=false,returned=false,uploadConflict_=false;float remoteFraction_=0;
  std::atomic<bool> fullRefreshPending_{false};
@@ -94,7 +100,8 @@ int main() {
  }
  { WeReadProgressSyncActivity p;allocationFails=true;p.startSync();assert(p.state_==S::AuthFailed&&p.error_==E::OutOfMemory&&!authLive);allocationFails=false; }
  { WeReadProgressSyncActivity p;p.startSync();p.nativeLogin_->event=A::Event::Failed;p.nativeLogin_->err=E::Protocol;
-   p.advanceNativeLogin();assert(p.state_==S::AuthFailed&&!authLive&&!p.nativeReady_&&!p.operation_.starts); }
+   p.advanceNativeLogin();assert(p.state_==S::AuthFailed&&!authLive&&!p.nativeReady_&&!p.operation_.starts);
+   assert(p.authPhase_==A::Phase::Qr && strstr(p.authDiagnostic_,"T6:-188")); }
  { WeReadProgressSyncActivity p;p.startSync();p.nativeLogin_->ready=false;
    p.advanceNativeLogin();assert(p.state_==S::Authenticating); } // Cancellation releases workspace.
  assert(!authLive);
@@ -114,6 +121,70 @@ int main() {
    p.advanceSync();assert(p.state_==S::LoginRequired&&!p.nativeRecoveryAttempted_); }
 }
 ''')
+
+    def test_actual_http_framing_preserves_status_and_failure_stage(self):
+        header = re.sub(r'^#(?:include.*|pragma once)\n', '', (LIB/'WeReadHttpClient.h').read_text(), flags=re.M)
+        source = re.sub(r'^#include.*\n', '', (LIB/'WeReadHttpClient.cpp').read_text(), flags=re.M)
+        compile_run(r"""
+#include <cstdint>
+#include <cstddef>
+#include <cstdio>
+#include <cstring>
+#include <strings.h>
+#include <cctype>
+#include <algorithm>
+#include <limits>
+#include <functional>
+#include <string>
+#include <cassert>
+#define FREEINK_NET_WOLFSSL 1
+#define CROSSPOINT_VERSION "test"
+#define LOG_INF(...)
+#define LOG_ERR(...)
+#define LOG_DBG(...)
+using wifi_mode_t=int;
+constexpr int WIFI_MODE_STA=1,WL_CONNECTED=1;
+bool online=true;int fault=0;unsigned tick=0;
+unsigned millis(){return ++tick;}void delay(unsigned n){tick+=n;}
+struct { int getMode(){return online?1:0;}int status(){return online?1:0;} } WiFi;
+struct { unsigned getFreeHeap(){return 50000;}unsigned getMaxAllocHeap(){return 24000;} } ESP;
+std::string wire;
+namespace freeink {
+ struct SecureClient {
+  size_t offset=0;bool active=false;int stage=0,err=0;
+  void setCACert(const char* c){assert(!strcmp(c,"root"));}void setInsecure(){assert(false);}
+  void setTimeout(unsigned){}bool connect(const char*,uint16_t){offset=0;if(fault==1){stage=6;err=-188;return false;}return active=true;}
+  bool connected(){return active&&offset<wire.size();}void stop(){active=false;}
+  int available(){return active?wire.size()-offset:0;}
+  size_t write(const uint8_t*,size_t n){if(fault==2){stage=8;err=-125;return 0;}return n;}
+  int read(){return connected()?static_cast<unsigned char>(wire[offset++]):-1;}
+  int read(uint8_t* b,size_t n){if(!connected())return -1;n=std::min(n,wire.size()-offset);memcpy(b,wire.data()+offset,n);offset+=n;return n;}
+  unsigned lastErrorStage(){return stage;}int lastError(){return err;}int firstHandshakeError(){return fault==1?-125:0;}
+ };
+}
+""" + header + source + r"""
+int main(){
+ using namespace WeReadHttpClient;
+ Diagnostic d;uint8_t io[1024];RequestOptions o;o.rootCA="root";o.readBuffer=io;o.readBufferSize=sizeof(io);o.diagnostic=&d;
+ const char* url="https://i.weread.qq.com/book/getProgress?bookId=456";int status=0;size_t received=0,maxChunk=0;
+ DataCallback accept=[&](const uint8_t*,size_t n){received+=n;maxChunk=std::max(maxChunk,n);return true;};
+ auto run=[&](DataCallback cb){Session s;return request(s,url,o,cb,{},status);};
+ wire="HTTP/1.1 401 LOGIN ERR\r\nContent-Length: 100\r\n\r\n{}";
+ assert(run(accept)==Result::NetworkError&&status==401&&d.stage==RequestStage::Body);
+ wire="HTTP/1.1 403 FORBIDDEN\r\nContent-Length: 2\r\n\r\n{}";
+ assert(run([](const uint8_t*,size_t){return false;})==Result::Aborted&&status==403&&d.stage==RequestStage::Body);
+ wire="HTTP/1.1 200 OK\r\nContent-Length: 68114\r\nConnection: close\r\n\r\n"+std::string(68114,'x');
+ received=maxChunk=0;assert(run(accept)==Result::Ok&&status==200&&received==68114&&maxChunk<=1024&&d.stage==RequestStage::Complete);
+ wire="HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n";
+ received=0;assert(run(accept)==Result::Ok&&received==2);
+ fault=1;assert(run(accept)==Result::NetworkError&&status==-1&&d.stage==RequestStage::Connect);
+ assert(d.tlsStage==6&&d.tlsError==-188&&d.firstTlsError==-125&&d.freeBefore==50000&&d.largestBefore==24000);
+ fault=2;assert(run(accept)==Result::NetworkError&&d.stage==RequestStage::Write&&d.tlsError==-125);
+ fault=0;wire="";assert(run(accept)==Result::NetworkError&&d.stage==RequestStage::Status);
+ wire="HTTP/1.1 200 OK\r\nContent-Length:";assert(run(accept)==Result::NetworkError&&status==200&&d.stage==RequestStage::Headers);
+ online=false;assert(run(accept)==Result::NetworkError&&status==-1&&d.stage==RequestStage::Wifi&&d.tlsError==0);
+}
+""")
 
     def test_protocol_bounds_account_binding_and_login_signature(self):
         result = compile_run(r'''
@@ -156,6 +227,7 @@ int main() {
  assert(!strcmp(r.timestamp,"1700056800")&&!strcmp(r.uuid,"test-uuid"));
  r={}; assert(parse(r,R"({"wx_errcode":405,"wx_code":"test-code"})")); assert(r.hasQrStatus&&r.qrStatus==405);
  r={}; assert(parse(r,R"({"errCode":-2012})")); assert(r.errorCode==-2012);
+ r={}; assert(parse(r,R"({"errcode":-2012,"errlog":"expired","errmsg":"expired"})")); assert(r.errorCode==-2012);
  for(const char* bad:{R"({"vid":true})",R"({"vid":null})",R"({"vid":["123"]})",
                       R"({"vid":{"vid":"123"}})",R"({"vid":"123","vid":"456"})",
                       R"([{"vid":"123"}])",R"({"wx_errcode":405.1})",R"({"wx_errcode":999999999999})",
@@ -163,7 +235,7 @@ int main() {
   r={}; if(parse(r,bad)) { fprintf(stderr,"Unexpected accepted JSON: %s\n",bad); assert(false); }
  }
  r={}; assert(!parse(r,"{\"accessToken\":\""+std::string(600,'a')+"\"}"));
- r={}; assert(parse(r,"{\"qrcode\":{\"qrcodebase64\":\""+std::string(4096,'a')+"\"},\"uuid\":\"ok\"}"));
+ r={}; assert(parse(r,"{\"qrcode\":{\"qrcodebase64\":\""+std::string(68000,'a')+"\"},\"uuid\":\"ok\"}"));
  r={}; assert(parse(r,R"({"nested":{"vid":"123","wx_errcode":405}})"));
  assert(!r.credentials.vid[0]&&!r.hasQrStatus);
 }
@@ -187,6 +259,8 @@ int main() {
 #include <algorithm>
 #include <cstring>
 #include <functional>
+#define LOG_ERR(...)
+#define CROSSPOINT_VERSION "test-version"
 #include <map>
 #include <string>
 #include <vector>
@@ -224,12 +298,15 @@ namespace WeReadStore { bool ensureRoot() { return true; }
 }
 namespace WeReadHttpClient {
  enum class Result { Ok, NetworkError, Aborted };
+ enum class RequestStage { None,Wifi,Setup,Connect,Write,Status,Headers,Body,Complete };
+ struct Diagnostic { RequestStage stage=RequestStage::None;uint8_t tlsStage=0;int tlsError=0,firstTlsError=0;
+  uint32_t freeBefore=0,largestBefore=0,freeAfter=0,largestAfter=0; };
  struct Session { void reset() {} };
  struct Header { const char* name; const char* value; };
  struct RequestOptions {
   const char* method="GET"; const uint8_t* body=nullptr; size_t bodySize=0;
   const Header* headers=nullptr; size_t headerCount=0; int timeoutMs=60000; bool redactUrl=false;
-  const char* rootCA=nullptr; uint8_t* readBuffer=nullptr; size_t readBufferSize=0;
+  const char* rootCA=nullptr; uint8_t* readBuffer=nullptr; size_t readBufferSize=0;Diagnostic* diagnostic=nullptr;
  };
  using DataCallback=std::function<bool(const uint8_t*,size_t)>;
  using HeaderCallback=std::function<void(const char*,const char*)>;
@@ -242,7 +319,8 @@ namespace WeReadHttpClient {
   assert(std::string(o.rootCA)=="verified-test-root"&&o.redactUrl);
   assert(o.headerCount==(r.auth?9:7));assert(std::string(o.method)==(r.post?"POST":"GET"));
   if(o.body)lastBody.assign((const char*)o.body,o.bodySize);
-  status=r.status;
+  status=r.status;assert(o.diagnostic);
+  o.diagnostic->stage=RequestStage::Connect;o.diagnostic->tlsStage=6;o.diagnostic->tlsError=-188;
   if(r.result!=Result::Ok)return r.result;
   for(size_t i=0;i<r.json.size();i+=7) if(!cb((const uint8_t*)r.json.data()+i,std::min(size_t(7),r.json.size()-i)))return Result::Aborted;
   return Result::Ok;
@@ -255,6 +333,7 @@ using Event=Login::Event;
 using Failure=Login::Failure;
 using namespace WeReadHttpClient;
 const char* path="/.crosspoint/weread/native-session.json";
+const char* diagnosticPath="/.crosspoint/weread/native-auth-error.txt";
 const std::string old=R"({"vid":"123","accessToken":"old-token","deviceId":"test-device","installId":"test-install"})";
 E error;
 void reset() { files.clear();responses.clear();calls=0;tick=0;epoch=1700056800;writeFails=corruptWrite=renameFails=false;online=true; }
@@ -298,6 +377,24 @@ int main() {
   else { assert(l.step(error)==Event::Failed);assert(l.step(error)==Event::Failed);assert(calls==1); }
   assert(files[path]==old);
  }
+ // HTTP 401/403 must open QR even when the error body aborts/truncates.
+ for(int status:{401,403}) for(Result transport:{Result::Ok,Result::NetworkError,Result::Aborted}) {
+  reset();files[path]=old;responses.push_back({"/book/getProgress?",R"({"errcode":-2012})",status,transport,true});qrResponses();
+  Login l;assert(l.begin("123","456"));assert(l.step(error)==Event::None);
+  assert(l.step(error)==Event::None);assert(l.step(error)==Event::None);assert(l.step(error)==Event::QrReady);
+  assert(files[path]==old&&!files.count(diagnosticPath));
+ }
+ // A malformed HTTP 200 is a protocol failure, not a transient poll timeout.
+ reset();qrResponses();
+ { Login l;showQr(l);responses.push_back({"/connect/l/qrconnect?",R"({"wx_errcode":true})"});
+   assert(l.step(error)==Event::Failed&&error==E::Protocol);
+   assert(l.failurePhase()==Login::Phase::Poll);
+   char code[96];l.diagnosticCode(code,sizeof(code));assert(strstr(code,"A4")&&strstr(code,"T6:-188"));
+   const auto report=files[diagnosticPath];assert(report.find("tls_error=-188")!=std::string::npos);
+   for(const char* secret:{"old-token","test-code","test-uuid","test-device","test-install","accessToken","http://","https://"})
+    assert(report.find(secret)==std::string::npos);
+   const auto snapshot=files;assert(l.step(error)==Event::Failed&&files==snapshot);
+ }
  // Wrong-account login, failed/short write, bad readback and failed final rename preserve old session.
  for(int scenario=0;scenario<5;++scenario) {
   reset();qrResponses();exchangeResponses(scenario==0?"999":"123");
@@ -320,17 +417,17 @@ int main() {
   else if(scenario==2)responses.push_back({"/connect/l/qrconnect?",R"({"wx_code":"oops"})"});
   else if(scenario==3) { online=false;responses.push_back({"/connect/l/qrconnect?","",200,Result::NetworkError}); }
   else continue; // Destruction of the workspace is cancellation; no callbacks or workers outlive it.
-  assert(l.step(error)==Event::Failed);assert(files.empty());
+  assert(l.step(error)==Event::Failed);assert(!files.count(path));
  }
  // A lost login response is never retried with the same authorization code.
  reset();qrResponses();exchangeResponses();responses.back().result=Result::NetworkError;
  { Login l;showQr(l);assert(l.step(error)==Event::None);assert(l.step(error)==Event::Failed);
-   assert(l.step(error)==Event::Failed&&calls==4&&files.empty()); }
+   assert(l.step(error)==Event::Failed&&calls==4&&!files.count(path)); }
  // Recover previous complete session after interruption between replacement renames.
  reset();files[std::string(path)+".bak"]=old;
  responses.push_back({"/book/getProgress?",R"({"bookId":"456"})",200,Result::Ok,true});
  { Login l;assert(l.begin("123","456"));assert(l.step(error)==Event::None);assert(l.step(error)==Event::Complete);assert(files[path]==old); }
- // No clock: no network or disk mutation. Counter wrap still expires QR after five minutes.
+ // No clock: no network or session mutation. Counter wrap still expires QR after five minutes.
  reset();epoch=0;
  { Login l;assert(l.begin("123","456"));assert(l.step(error)==Event::Failed);assert(error==E::Clock&&calls==0); }
  reset();qrResponses();tick=UINT32_MAX-1000;

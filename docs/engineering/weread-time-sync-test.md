@@ -1,7 +1,7 @@
 # Native offline reading-time sync test build
 
-Test3 base `ab101542b7fbbc63a749b0ec5b889f68c1b78be6`, pinned SDK
-`4d1f1e013955213ff14b57b001547d73d4b33b0f`; version `1.6.0-time-test3`.
+Test4 base `f5c440cf678dbaad879d30de1af274d71a66523f`; version `1.6.0-time-test4`.
+The SDK is pinned by the `freeink-sdk` gitlink; the output manifest records its exact commit.
 X3/X4 ESP32-C3 `gh_release`; original partitions and SD updater.
 
 ## Evidence
@@ -126,9 +126,9 @@ credit and physical UI/heap/power remain acceptance tests, not host-test claims.
 
 ## Device acceptance
 
-1. Back up SD (including hidden `.crosspoint`). Copy test3 `update.bin` and use
+1. Back up SD (including hidden `.crosspoint`). Copy test4 `update.bin` and use
    the working CrossMux SD updater. Preserve existing books, sessions and ledgers.
-2. Confirm About shows `1.6.0-time-test3`. Connect once and verify clock/date before
+2. Confirm About shows `1.6.0-time-test4`. Connect once and verify clock/date before
    reading offline. Compare the phone's starting book/day time.
 3. Read a NEW short session, with normal manual page turns. Open Sync Progress,
    scan/confirm if prompted, resolve direction if asked, and wait for the network
@@ -189,7 +189,7 @@ device acceptance; no new duration was submitted during development.
 ### 中文测试提示
 
 拉取时务必选择 `codex/weread-time-sync`，并带上子模块。版本应显示
-`1.6.0-time-test3`。凭证一直是独立保存在 SD 卡里的，不在固件或仓库中。
+`1.6.0-time-test4`。凭证一直是独立保存在 SD 卡里的，不在固件或仓库中。
 第一次同步或凭证过期时，会在 X3 上显示二维码；使用当前书架对应的微信账号
 扫码并确认，设备保存后自动继续。有效凭证会直接复用，不需要每次扫码。
 
@@ -201,3 +201,55 @@ device acceptance; no new duration was submitted during development.
 首次实测核对：过期凭证出现二维码；确认后继续同步；重启后再次同步无需扫码；
 不继续阅读而重复同步不会重复计时。二维码页返回、过期后重试以及扫错账号都应
 保留待同步时长。不要为了测试而清空 `.crosspoint` 或删除时长目录。
+
+
+## Test4: pre-QR failure diagnosis
+
+The owner reported a test3 network error before seeing a QR code, while normal
+Web shelf networking still worked. On 2026-10-04, desktop read-only probes using
+the embedded root returned HTTP 401 / `errcode: -2012` for the expired native
+session, HTTP 200 for `/wxticket`, and HTTP 200 with a 68,114-byte SDK QR response.
+All three real responses pass the production streaming auth parser. This does
+not identify the X3 failure: device transport, clock and heap need device evidence.
+No reading-time POST was sent in this investigation.
+
+`Login::request` and `Upload::request` previously returned Network before looking
+at a verified HTTP 401/403 when response reading aborted or broke. Test4 treats
+that auth rejection as SessionExpired even with an incomplete error body. A
+callback abort caused by invalid/oversized JSON is Protocol, not a network timeout;
+API error fields are trusted only in complete, valid responses. The saved session
+and unattempted ledgers remain intact, and uncertain uploads are never replayed.
+This is a confirmed error-classification defect, not a confirmed explanation of
+the owner's device failure.
+
+Native login failures now display the operation and a compact numeric code. The
+last terminal failure also overwrites `/.crosspoint/weread/native-auth-error.txt`.
+It contains only version, UTC, numeric stages/errors, response byte count, parser
+flags, and before/after heap totals/largest blocks. It does not contain URLs,
+headers, credentials, QR codes, account IDs, book IDs, or response bodies. It reuses
+the existing request buffer, writes at most 1 KiB once per failed attempt, and adds
+no worker, timer, background network or polling writes. Successful QR waits do not
+write diagnostics. A diagnostic write failure does not change the original error.
+The existing <8 KiB login and <12 KiB upload workspace limits still compile.
+
+Code fields:
+
+- `A`: auth phase: 0 load, 1 check saved session, 2 ticket, 3 QR, 4 poll, 5 exchange, 6 save.
+- `N`: HTTP stage: 1 Wi-Fi, 2 setup, 3 connect, 4 write, 5 status, 6 headers, 7 body, 8 complete.
+- `Tstage:error`: SDK stage: 1 TCP, 2 context allocation, 3 trust root, 4 TLS session allocation,
+  5 hostname setup, 6 handshake, 7 handshake timeout, 8 write, 9 read. The signed error is the
+  original wolfSSL result; zero means no numeric TLS error was supplied. SD diagnostics also
+  retain the initial handshake error if the existing TLS 1.2 fallback was attempted.
+- `H`: HTTP status (`-1` means none received); `E`: parsed API error (zero alone is not success).
+
+Test4 host verification adds actual HTTP framing/failure-stage execution, truncated
+401/403 handling, the observed lowercase error field, a 68 KiB ignored QR bitmap,
+protocol-vs-network classification, terminal diagnostic privacy/storage behavior,
+and SDK error retention after cleanup. These use deterministic transport faults;
+physical TLS/memory, on-screen layout, QR scan and battery remain unverified.
+
+To collect evidence without a USB cable: update from SD, open the same book's
+Sync Progress once, and photograph any failure screen. For more detail, power off,
+put the SD card in the computer, and read only `native-auth-error.txt`. Preserve
+`.crosspoint`, native sessions and time ledgers. Retrying after a failed login is
+safe for unattempted pending time; already-uncertain batches remain quarantined.

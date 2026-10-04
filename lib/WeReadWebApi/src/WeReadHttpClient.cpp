@@ -19,6 +19,10 @@ namespace {
 
 bool containsNewline(const char* value) { return value && (strchr(value, '\r') || strchr(value, '\n')); }
 
+void requestStage(const WeReadHttpClient::RequestOptions& options, WeReadHttpClient::RequestStage stage) {
+  if (options.diagnostic) options.diagnostic->stage = stage;
+}
+
 bool copyHttpsUrlParts(const char* url, char* host, const size_t hostSize, const char*& path) {
   WeReadHttpClient::HttpsUrlView view;
   if (!host || hostSize < 2 || !WeReadHttpClient::parseHttpsUrl(url, view) || view.hostLength >= hostSize) return false;
@@ -249,6 +253,7 @@ WeReadHttpClient::Result runRequest(const char* url, const WeReadHttpClient::Req
   else
     client.setInsecure();
   client.setTimeout(static_cast<unsigned long>(options.timeoutMs));
+  requestStage(options, WeReadHttpClient::RequestStage::Connect);
   if (!reused && !client.connect(host, HTTPS_PORT)) {
     LOG_ERR("HTTP", "wolfSSL request connect failed");
     cleanupClient(client);
@@ -261,6 +266,7 @@ WeReadHttpClient::Result runRequest(const char* url, const WeReadHttpClient::Req
   }
   memcpy(sessionHost, host, strlen(host) + 1);
 
+  requestStage(options, WeReadHttpClient::RequestStage::Write);
   bool hasUserAgent = false;
   char contentLength[32];
   const int contentLengthSize =
@@ -290,6 +296,7 @@ WeReadHttpClient::Result runRequest(const char* url, const WeReadHttpClient::Req
   }
 
   size_t lineLength = 0;
+  requestStage(options, WeReadHttpClient::RequestStage::Status);
   if (!readLine(client, options.readBuffer, options.readBufferSize, options.timeoutMs, lineLength)) {
     LOG_ERR("HTTP", "wolfSSL status read failed");
     cleanupClient(client);
@@ -311,6 +318,7 @@ WeReadHttpClient::Result runRequest(const char* url, const WeReadHttpClient::Req
   bool peerRequestedClose = false;
   size_t responseLength = 0;
 
+  requestStage(options, WeReadHttpClient::RequestStage::Headers);
   while (true) {
     if (!readLine(client, options.readBuffer, options.readBufferSize, options.timeoutMs, lineLength)) {
       LOG_ERR("HTTP", "wolfSSL header read failed");
@@ -368,6 +376,7 @@ WeReadHttpClient::Result runRequest(const char* url, const WeReadHttpClient::Req
   }
 
   TransferResult transfer = TransferResult::Ok;
+  requestStage(options, WeReadHttpClient::RequestStage::Body);
   switch (framing) {
     case BodyFraming::None:
       break;
@@ -504,6 +513,7 @@ WeReadHttpClient::Result runRequest(const char* url, const WeReadHttpClient::Req
     }
   }
 
+  requestStage(options, WeReadHttpClient::RequestStage::Connect);
   esp_err_t err = esp_http_client_open(client, static_cast<int>(options.bodySize));
   if (err != ESP_OK) {
     LOG_ERR("HTTP", "verified request open failed: %s", esp_err_to_name(err));
@@ -511,6 +521,7 @@ WeReadHttpClient::Result runRequest(const char* url, const WeReadHttpClient::Req
     return WeReadHttpClient::Result::NetworkError;
   }
 
+  requestStage(options, WeReadHttpClient::RequestStage::Write);
   size_t sent = 0;
   while (sent < options.bodySize) {
     const int written = esp_http_client_write(client, reinterpret_cast<const char*>(options.body + sent),
@@ -523,6 +534,7 @@ WeReadHttpClient::Result runRequest(const char* url, const WeReadHttpClient::Req
     sent += static_cast<size_t>(written);
   }
 
+  requestStage(options, WeReadHttpClient::RequestStage::Headers);
   if (esp_http_client_fetch_headers(client) < 0) {
     LOG_ERR("HTTP", "verified request header read failed");
     cleanupClient(client);
@@ -530,6 +542,7 @@ WeReadHttpClient::Result runRequest(const char* url, const WeReadHttpClient::Req
   }
   status = esp_http_client_get_status_code(client);
 
+  requestStage(options, WeReadHttpClient::RequestStage::Body);
   while (true) {
     const int got = esp_http_client_read(client, reinterpret_cast<char*>(options.readBuffer),
                                          static_cast<int>(options.readBufferSize));
@@ -625,17 +638,18 @@ void Session::clearStats() {
 
 Result request(const char* url, const RequestOptions& options, const DataCallback& onData,
                const HeaderCallback& onHeader, int& status) {
-  if (!networkReady()) {
-    status = -1;
-    LOG_INF("HTTP", "Request skipped: Wi-Fi not ready");
-    return Result::NetworkError;
-  }
   Session session;
   return request(session, url, options, onData, onHeader, status);
 }
 
 Result request(Session& session, const char* url, const RequestOptions& options, const DataCallback& onData,
                const HeaderCallback& onHeader, int& status) {
+  if (options.diagnostic) {
+    *options.diagnostic = {};
+    options.diagnostic->freeBefore = ESP.getFreeHeap();
+    options.diagnostic->largestBefore = ESP.getMaxAllocHeap();
+  }
+  requestStage(options, RequestStage::Wifi);
   if (!networkReady()) {
     status = -1;
     LOG_INF("HTTP", "Request skipped: Wi-Fi not ready");
@@ -647,8 +661,20 @@ Result request(Session& session, const char* url, const RequestOptions& options,
   }
   LOG_DBG("HTTP", "%s %s", options.method ? options.method : "?",
           options.redactUrl ? "[login URL redacted]" : (url ? url : "?"));
-  return runRequest(url, options, onData, onHeader, status, session.client_, session.host_, sizeof(session.host_),
-                    session.newConnections_, session.reusedRequests_);
+  requestStage(options, RequestStage::Setup);
+  const auto result = runRequest(url, options, onData, onHeader, status, session.client_, session.host_,
+                                 sizeof(session.host_), session.newConnections_, session.reusedRequests_);
+  if (options.diagnostic) {
+#if defined(FREEINK_NET_WOLFSSL) && !defined(CROSSPOINT_EMULATED)
+    options.diagnostic->tlsStage = static_cast<uint8_t>(session.client_.lastErrorStage());
+    options.diagnostic->tlsError = session.client_.lastError();
+    options.diagnostic->firstTlsError = session.client_.firstHandshakeError();
+#endif
+    options.diagnostic->freeAfter = ESP.getFreeHeap();
+    options.diagnostic->largestAfter = ESP.getMaxAllocHeap();
+    if (result == Result::Ok) options.diagnostic->stage = RequestStage::Complete;
+  }
+  return result;
 }
 
 }  // namespace WeReadHttpClient

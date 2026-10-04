@@ -26,6 +26,15 @@ struct Header {
   const char* value;
 };
 
+// Fixed-size, opt-in request diagnostics. Never records URLs, headers or bodies.
+enum class RequestStage : uint8_t { None, Wifi, Setup, Connect, Write, Status, Headers, Body, Complete };
+struct Diagnostic {
+  RequestStage stage = RequestStage::None;
+  uint8_t tlsStage = 0;
+  int tlsError = 0, firstTlsError = 0;
+  uint32_t freeBefore = 0, largestBefore = 0, freeAfter = 0, largestAfter = 0;
+};
+
 struct RequestOptions {
   const char* method = "GET";
   const uint8_t* body = nullptr;
@@ -37,6 +46,7 @@ struct RequestOptions {
   const char* rootCA = nullptr;  // Optional verified trust root; native time sync requires it.
   uint8_t* readBuffer = nullptr;
   size_t readBufferSize = 0;
+  Diagnostic* diagnostic = nullptr;
 };
 
 struct HttpsUrlView {

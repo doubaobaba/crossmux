@@ -12,14 +12,21 @@ class Login {
  public:
   enum class Event { None, QrReady, Scanned, Complete, Failed };
   enum class Failure { None, Expired, Declined, AccountMismatch };
+  enum class Phase { Load, Verify, Ticket, Qr, Poll, Exchange, Save, Done, Failed };
   bool begin(const char* expectedVid, const char* bookId, bool forceLogin = false);
   Event step(WeReadClient::Error& error);
   const char* qrUrl() const { return qrUrl_; }
   Failure failure() const { return failure_; }
   bool readyToStep() const;
+  Phase failurePhase() const { return failurePhase_; }
+  void diagnosticCode(char* out, size_t capacity) const;
 
  private:
-  enum class Phase { Load, Verify, Ticket, Qr, Poll, Exchange, Save, Done, Failed } phase_ = Phase::Load;
+  Phase phase_ = Phase::Load, failurePhase_ = Phase::Load;
+  WeReadHttpClient::Diagnostic diagnostic_;
+  int httpStatus_ = 0;
+  size_t received_ = 0;
+  WeReadHttpClient::Result transportResult_ = WeReadHttpClient::Result::Ok;
   WeReadHttpClient::Session session_;
   WeReadNativeProtocol::Credentials credentials_;
   Reply reply_;
@@ -34,6 +41,7 @@ class Login {
   bool load();
   bool save();
   void newDevice();
+  void saveDiagnostic(WeReadClient::Error error);
   WeReadClient::Error request(const char* url, bool authenticated = false, bool post = false, int timeout = 15000);
 };
 }  // namespace WeReadNativeAuth

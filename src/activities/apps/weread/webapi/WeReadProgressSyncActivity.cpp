@@ -182,6 +182,8 @@ void WeReadProgressSyncActivity::startSync() {
 void WeReadProgressSyncActivity::startNativeLogin() {
   operation_.reset();
   authFailure_ = WeReadNativeAuth::Login::Failure::None;
+  authPhase_ = WeReadNativeAuth::Login::Phase::Load;
+  authDiagnostic_[0] = 0;
   nativeQrUrl_[0] = 0;
   // <8 KiB fixed workspace cannot fit the activity task stack. Released before
   // Web sync or the separate native upload allocation; no background worker.
@@ -225,6 +227,8 @@ void WeReadProgressSyncActivity::advanceNativeLogin() {
       break;
     case WeReadNativeAuth::Login::Event::Failed:
       authFailure_ = nativeLogin_->failure();
+      authPhase_ = nativeLogin_->failurePhase();
+      nativeLogin_->diagnosticCode(authDiagnostic_, sizeof(authDiagnostic_));
       nativeLogin_.reset();
       state_ = State::AuthFailed;
       break;
@@ -471,6 +475,24 @@ const char* WeReadProgressSyncActivity::errorMessage() const {
   return tr(STR_SYNC_FAILED_MSG);
 }
 
+const char* WeReadProgressSyncActivity::authPhaseMessage() const {
+  using Phase = WeReadNativeAuth::Login::Phase;
+  switch (authPhase_) {
+    case Phase::Ticket:
+      return tr(STR_WEREAD_NATIVE_STAGE_TICKET);
+    case Phase::Qr:
+      return tr(STR_WEREAD_NATIVE_STAGE_QR);
+    case Phase::Poll:
+      return tr(STR_WEREAD_NATIVE_STAGE_POLL);
+    case Phase::Exchange:
+      return tr(STR_WEREAD_NATIVE_STAGE_EXCHANGE);
+    case Phase::Save:
+      return tr(STR_WEREAD_NATIVE_STAGE_SAVE);
+    default:
+      return tr(STR_WEREAD_NATIVE_CHECKING);
+  }
+}
+
 void WeReadProgressSyncActivity::loop() {
   if (!radioStopped_ && wifiActivated_ &&
       (state_ == State::Success || state_ == State::TimeFailed || state_ == State::Failed ||
@@ -622,10 +644,20 @@ void WeReadProgressSyncActivity::render(RenderLock&&) {
                                 tr(STR_WEREAD_NATIVE_AUTO_CONTINUE));
       break;
     }
-    case State::AuthFailed:
-      UITheme::drawCenteredWrappedText(renderer, textBounds, UI_10_FONT_ID, errorMessage(), 3, true,
-                                       EpdFontFamily::BOLD);
+    case State::AuthFailed: {
+      const int line = renderer.getLineHeight(UI_10_FONT_ID);
+      const int top = SubpageLayout::centeredTop(content, line * 9);
+      UITheme::drawCenteredText(renderer, textBounds, UI_10_FONT_ID, top, authPhaseMessage(), true,
+                                EpdFontFamily::BOLD);
+      UITheme::drawCenteredWrappedText(renderer, Rect{textBounds.x, top + line * 2, textBounds.width, line * 3},
+                                       UI_10_FONT_ID, errorMessage(), 3, true, EpdFontFamily::BOLD);
+      if (authDiagnostic_[0]) {
+        UITheme::drawCenteredText(renderer, textBounds, UI_10_FONT_ID, top + line * 6, authDiagnostic_);
+        UITheme::drawCenteredText(renderer, textBounds, UI_10_FONT_ID, top + line * 8,
+                                  tr(STR_WEREAD_NATIVE_REPORT_CODE));
+      }
       break;
+    }
     case State::WifiSelection:
     case State::Starting:
     case State::Syncing:

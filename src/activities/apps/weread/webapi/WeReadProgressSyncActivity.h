@@ -58,6 +58,8 @@ class WeReadProgressSyncActivity final : public Activity {
   bool timeReady_ = false;
   std::unique_ptr<WeReadNativeAuth::Login> nativeLogin_;
   WeReadNativeAuth::Login::Failure authFailure_ = WeReadNativeAuth::Login::Failure::None;
+  WeReadNativeAuth::Login::Phase authPhase_ = WeReadNativeAuth::Login::Phase::Load;
+  char authDiagnostic_[96] = {};
   bool nativeReady_ = false;
   bool nativeRecoveryAttempted_ = false;
   bool forceNativeLogin_ = false;
@@ -90,4 +92,5 @@ class WeReadProgressSyncActivity final : public Activity {
   void returnToReader();
   const char* resultMessage() const;
   const char* errorMessage() const;
+  const char* authPhaseMessage() const;
 };
