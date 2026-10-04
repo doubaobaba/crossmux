@@ -1,6 +1,6 @@
 # Native offline reading-time sync test build
 
-Test5 base `394b04f1c575fcd9ba74be24654adf7a9b0a7b1a`; version `1.6.0-time-test5`.
+Test6 base `f7641b0ea445d4acd0fc2c3bda403659e66e3b27`; version `1.6.0-time-test6`.
 The SDK is pinned by the `freeink-sdk` gitlink; the output manifest records its exact commit.
 X3/X4 ESP32-C3 `gh_release`; original partitions and SD updater.
 
@@ -126,9 +126,9 @@ credit and physical UI/heap/power remain acceptance tests, not host-test claims.
 
 ## Device acceptance
 
-1. Back up SD (including hidden `.crosspoint`). Copy test5 `update.bin` and use
+1. Back up SD (including hidden `.crosspoint`). Copy test6 `update.bin` and use
    the working CrossMux SD updater. Preserve existing books, sessions and ledgers.
-2. Confirm About shows `1.6.0-time-test5`. Connect once and verify clock/date before
+2. Confirm About shows `1.6.0-time-test6`. Connect once and verify clock/date before
    reading offline. Compare the phone's starting book/day time.
 3. Read a NEW short session, with normal manual page turns. Open Sync Progress,
    scan/confirm if prompted, resolve direction if asked, and wait for the network
@@ -314,3 +314,39 @@ sync plus a second sync with the saved session.
 相同的 `-188`；启用替代证书链支持后，二维码获取成功，错误域名和不可信根证书
 仍被拒绝。test5 只修正这个兼容问题，不改阅读记录、登录保存或上传规则。
 升级后版本应为 `1.6.0-time-test5`，继续在原来的书里点“同步进度”验证扫码。
+
+
+## Test6: accept opaque, unused refresh tokens after QR confirmation
+
+The owner confirmed that test5 displays the QR code on X3. After confirmation,
+the device showed `A5 N7 T0:0 H200 E0`. Its SD diagnostic captured exchange phase
+5, HTTP 200, transport Aborted, 592 response bytes, JSON error 0, invalid 1,
+closed 1, and no TLS error. The login parser rejected a field in complete JSON;
+this failure occurs before Web progress or reading-time upload.
+
+The private credential saved by the successful desktop login contains `@` in
+`refreshToken`. Feeding those real saved login fields through the production
+test5 parser reproduces invalid=1 while all required credentials validate.
+Removing only the unused refresh token makes the same input pass. No private
+values are in fixtures, logs, firmware, or this repository.
+
+Test6 omits `refreshToken` from the selected-field table and streams past it,
+just like other unused response metadata. It is not consumed by sync, retained
+by the login reply parser, or persisted. Required fields keep their existing
+bounds, type/duplicate checks, safe-character rules and account binding; this
+does not broaden access-token or signature validation. Named field indices
+replace the numeric checks affected by removing that field. There is no new
+allocation, network request, task, timer or SD write, and no ledger format change.
+
+The real private credential now passes the production parser. A synthetic
+regression uses an opaque `@` token in the full login/save lifecycle; parser
+coverage includes before/after required fields, 1/7/512/1024-byte chunks, long
+optional values, null/nested optional values, malformed JSON and invalid or
+duplicate required credentials. Existing lifecycle tests still cover account
+mismatch, interrupted/failed saves, session reuse and expiry. The full current
+login response was not captured and no new desktop login or time upload was
+performed: final physical login/save/time-sync acceptance remains an X3 check.
+
+升级到 `1.6.0-time-test6` 后，在原来的书中点“同步进度”，扫码并确认。
+成功后再点一次同步，应复用已保存凭证；手机端核对时长即可。卡上历史记录
+保持原样，本次电脑端不提交任何阅读时长。

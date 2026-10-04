@@ -246,6 +246,52 @@ int main() {
         self.assertEqual(body['code'], 'test-code')
         self.assertEqual(body['deviceType'], 3)
 
+    def test_opaque_refresh_token_does_not_reject_valid_login(self):
+        compile_run(r'''
+#include "WeReadNativeAuthProtocol.h"
+#include <algorithm>
+#include <cassert>
+#include <cstring>
+#include <string>
+using namespace WeReadNativeAuth;
+bool parse(Reply& r,const std::string& s,size_t chunk) {
+ StreamingJsonParser p(r.callbacks());
+ for(size_t i=0;i<s.size();i+=chunk) {
+  p.feed(s.data()+i,std::min(chunk,s.size()-i));
+  if(p.hasError()||r.invalid)return false; // Same early-abort rule as Login::request.
+ }
+ p.feed(" ",1);return !p.hasError()&&!r.invalid&&r.closed;
+}
+int main() {
+ const std::string required=R"("vid":123,"accessToken":"test-token","deviceId":"test-device","installId":"test-install")";
+ // Synthetic values reproduce the real '@' shape without publishing the private token.
+ // Unused optional values may be absent, long, null or nested; required fields stay strict.
+ for(const std::string& refresh:{std::string(R"("opaque@refresh-token")"),std::string("null"),std::string("false"),
+      std::string("123"),std::string(R"({"accessToken":"ignored@value","vid":999})"),
+      std::string(R"(["unused",null,{"vid":999}])"),"\""+std::string(2048,'@')+"\""}) {
+  for(size_t chunk:{size_t(1),size_t(7),size_t(512),size_t(1024)}) {
+   for(bool first:{false,true}) {
+    const std::string optional="\"refreshToken\":"+refresh;
+    Reply r;assert(parse(r,"{"+(first?optional+","+required:required+","+optional)+"}",chunk));
+    assert(validCredentials(r.credentials,"123")&&!r.credentials.refreshToken[0]);
+    char saved[1024];assert(sessionJson(r.credentials,"123",saved,sizeof(saved)));
+    assert(!strstr(saved,"refreshToken")&&!strchr(saved,'@'));
+   }
+  }
+ }
+ for(const char* bad:{R"({"vid":123,"accessToken":"bad@token","refreshToken":"opaque@token"})",
+     R"({"vid":123,"accessToken":null,"refreshToken":"opaque@token"})",
+     R"({"vid":123,"accessToken":"one","accessToken":"two","refreshToken":"opaque@token"})",
+     R"({"vid":123,"refreshToken":"unterminated})",
+     R"({"signature":"bad@signature","refreshToken":"opaque@token"})"}) {
+  Reply r;assert(!parse(r,bad,7));
+ }
+ Reply r;assert(parse(r,R"({"vid":123,"refreshToken":"opaque@token"})",7));
+ assert(!validCredentials(r.credentials,"123"));
+}
+''', [LIB/'WeReadNativeAuthProtocol.cpp', LIB/'WeReadNativeProtocol.cpp',
+      ROOT/'lib/JsonParser/StreamingJsonParser.cpp'])
+
     def test_login_lifecycle_and_storage_faults(self):
         header = (LIB/'WeReadNativeAuth.h').read_text()
         header = re.sub(r'^#(?:include.*|pragma once)\n', '', header, flags=re.M)
@@ -349,7 +395,7 @@ void showQr(Login& login) {
 }
 void exchangeResponses(const char* vid="123") {
  responses.push_back({"/connect/l/qrconnect?",R"({"wx_errcode":405,"wx_code":"test-code"})"});
- responses.push_back({"/login",std::string("{\"vid\":\"")+vid+"\",\"accessToken\":\"new-token\",\"refreshToken\":\"unused\"}",200,Result::Ok,false,true});
+ responses.push_back({"/login",std::string("{\"vid\":\"")+vid+"\",\"accessToken\":\"new-token\",\"refreshToken\":\"opaque@refresh-token\"}",200,Result::Ok,false,true});
 }
 int main() {
  // Existing imported credential stays compatible; checking never invokes login or an upload.

@@ -6,9 +6,24 @@
 namespace WeReadNativeAuth {
 using namespace WeReadNativeProtocol;
 namespace {
-constexpr const char* kFields[] = {"vid",       "accessToken", "refreshToken", "deviceId", "installId",
-                                   "timeStamp", "signature",   "uuid",         "wx_code",  "bookId",
-                                   "errCode",   "errcode",     "wx_errcode"};
+// Refresh tokens are opaque (real replies include '@') and are neither used nor saved.
+// Stream them past like profile fields; do not apply access-token validation to them.
+enum Field {
+  Vid,
+  AccessToken,
+  DeviceId,
+  InstallId,
+  Timestamp,
+  Signature,
+  Uuid,
+  Code,
+  BookId,
+  ErrCode,
+  Errcode,
+  QrStatus
+};
+constexpr const char* kFields[] = {"vid",  "accessToken", "deviceId", "installId", "timeStamp", "signature",
+                                   "uuid", "wx_code",     "bookId",   "errCode",   "errcode",   "wx_errcode"};
 int field(const Reply& r) {
   if (r.depth != 1) return -1;
   for (unsigned i = 0; i < sizeof(kFields) / sizeof(kFields[0]); ++i) {
@@ -35,7 +50,6 @@ void scalar(void* ctx, const char* v, size_t n) {
   r.seen |= bit;
   char* fields[] = {r.credentials.vid,
                     r.credentials.accessToken,
-                    r.credentials.refreshToken,
                     r.credentials.deviceId,
                     r.credentials.installId,
                     r.timestamp,
@@ -45,7 +59,6 @@ void scalar(void* ctx, const char* v, size_t n) {
                     r.bookId};
   const size_t caps[] = {sizeof(r.credentials.vid),
                          sizeof(r.credentials.accessToken),
-                         sizeof(r.credentials.refreshToken),
                          sizeof(r.credentials.deviceId),
                          sizeof(r.credentials.installId),
                          sizeof(r.timestamp),
@@ -53,8 +66,9 @@ void scalar(void* ctx, const char* v, size_t n) {
                          sizeof(r.uuid),
                          sizeof(r.code),
                          sizeof(r.bookId)};
-  if (i < 10) {
-    if (!copy(fields[i], caps[i], v, n) || (n && !token(fields[i], i == 0 || i == 5 || i == 9))) r.invalid = true;
+  if (i < ErrCode) {
+    if (!copy(fields[i], caps[i], v, n) || (n && !token(fields[i], i == Vid || i == Timestamp || i == BookId)))
+      r.invalid = true;
     return;
   }
   bool negative = n && *v == '-';
@@ -72,7 +86,7 @@ void scalar(void* ctx, const char* v, size_t n) {
     number = number * 10 + (v[j] - '0');
   }
   const int result = negative ? -static_cast<int>(number) : static_cast<int>(number);
-  if (i == 12) {
+  if (i == QrStatus) {
     r.qrStatus = result;
     r.hasQrStatus = true;
   } else if (result)
@@ -85,7 +99,7 @@ void badScalar(void* ctx) {
 void number(void* ctx, const char* v, size_t n) {
   auto& r = *static_cast<Reply*>(ctx);
   const int i = field(r);
-  if (i >= 0 && i != 0 && i != 5 && i != 9 && i < 10) {
+  if (i >= 0 && i != Vid && i != Timestamp && i != BookId && i < ErrCode) {
     r.invalid = true;
     return;
   }
