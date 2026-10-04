@@ -1,6 +1,6 @@
 # Native offline reading-time sync test build
 
-Test4 base `f5c440cf678dbaad879d30de1af274d71a66523f`; version `1.6.0-time-test4`.
+Test5 base `394b04f1c575fcd9ba74be24654adf7a9b0a7b1a`; version `1.6.0-time-test5`.
 The SDK is pinned by the `freeink-sdk` gitlink; the output manifest records its exact commit.
 X3/X4 ESP32-C3 `gh_release`; original partitions and SD updater.
 
@@ -126,9 +126,9 @@ credit and physical UI/heap/power remain acceptance tests, not host-test claims.
 
 ## Device acceptance
 
-1. Back up SD (including hidden `.crosspoint`). Copy test4 `update.bin` and use
+1. Back up SD (including hidden `.crosspoint`). Copy test5 `update.bin` and use
    the working CrossMux SD updater. Preserve existing books, sessions and ledgers.
-2. Confirm About shows `1.6.0-time-test4`. Connect once and verify clock/date before
+2. Confirm About shows `1.6.0-time-test5`. Connect once and verify clock/date before
    reading offline. Compare the phone's starting book/day time.
 3. Read a NEW short session, with normal manual page turns. Open Sync Progress,
    scan/confirm if prompted, resolve direction if asked, and wait for the network
@@ -189,7 +189,7 @@ device acceptance; no new duration was submitted during development.
 ### 中文测试提示
 
 拉取时务必选择 `codex/weread-time-sync`，并带上子模块。版本应显示
-`1.6.0-time-test4`。凭证一直是独立保存在 SD 卡里的，不在固件或仓库中。
+`1.6.0-time-test5`。凭证一直是独立保存在 SD 卡里的，不在固件或仓库中。
 第一次同步或凭证过期时，会在 X3 上显示二维码；使用当前书架对应的微信账号
 扫码并确认，设备保存后自动继续。有效凭证会直接复用，不需要每次扫码。
 
@@ -253,3 +253,64 @@ Sync Progress once, and photograph any failure screen. For more detail, power of
 put the SD card in the computer, and read only `native-auth-error.txt`. Preserve
 `.crosspoint`, native sessions and time ledgers. Retrying after a failed login is
 safe for unattempted pending time; already-uncertain batches remain quarantined.
+
+
+## Test5: cross-signed QR certificate chain
+
+The owner's test4 screen reported `A3 N3 T6:-188 H-1 E0`. The SD diagnostic
+confirmed auth phase 3 (QR), HTTP connect stage 3, initial and fallback handshake
+error -188, and zero response bytes. Arduino-wolfSSL 5.7.2's
+`wolfssl/wolfcrypt/error-crypt.h:141` defines -188 as `ASN_NO_SIGNER_E`.
+This failure occurs before login confirmation or any reading-time upload.
+
+Live certificate capture on 2026-10-04 showed the difference:
+
+- `i.weread.qq.com`: leaf, DigiCert Secure Site OV G2 intermediate.
+- `open.weixin.qq.com` and `long.open.weixin.qq.com`: leaf, same intermediate,
+  plus DigiCert Global Root G2 cross-signed by DigiCert Global Root CA.
+
+The firmware already trusts self-signed DigiCert Global Root G2. Its existing
+wolfSSL build nevertheless required every presented CA to verify, including the
+extra cross-signed certificate whose older issuer is not in the trust store.
+This is documented in wolfSSL `src/internal.c:35-39,14895-14918` and the
+[official alternate-chain explanation](https://www.wolfssl.com/configuring-wolfssl-alternate-certificate-chain-feature-enabled/).
+
+Test5 adds `WOLFSSL_ALT_CERT_CHAINS` to the shared build flags. The peer still must
+validate through the existing trusted G2 root, with signatures, validity dates
+and hostname checked. It does not add an older trust root, accept arbitrary peer
+certificates, disable TLS verification, or introduce a verify callback. The SDK
+pin, all login/time-sync logic, ledger format and SD update method are unchanged.
+No new application allocation, worker, timer, background network or card-write
+path is introduced; physical peak heap and power remain device acceptance checks.
+
+For verification, the exact installed Arduino-wolfSSL 5.7.2 C sources and patched
+`user_settings.h` were compiled on the host with the firmware wolfSSL flags in
+two variants differing only in `WOLFSSL_ALT_CERT_CHAINS`. POSIX sockets replaced
+the ESP32 TCP transport; this is not a claim of MCU heap or timing equivalence.
+Both variants loaded the unchanged firmware G2 root and requested X25519 and
+2 KiB TLS fragments, matching SecureClient.
+
+All 24 handshake cases matched their expected result:
+
+- Before: both WeChat QR hosts fail -188 in TLS 1.3 and TLS 1.2; native WeRead
+  succeeds in both versions (6 cases).
+- After: all three hosts succeed in both versions (6 cases).
+- After with an incorrect expected hostname: all three hosts reject with -322
+  in both versions (6 cases).
+- After with an unrelated trusted root: all three hosts still reject with -188
+  in both versions (6 cases).
+
+The rebuilt wolfSSL then performed read-only `/wxticket` and SDK QR GET requests:
+both returned HTTP 200, the QR response had `errcode:0` and a 16-character UUID.
+No QR authorization was confirmed, login code exchanged, or reading duration
+submitted from the computer. The test5 package includes a sanitized result matrix
+and test logs. The 98 targeted CTest entries also pass. The next physical check is
+to install test5, obtain the QR screen, confirm the same account, and verify time
+sync plus a second sync with the saved session.
+
+### 本次修复
+
+你的 test4 日志已经定位到二维码接口的证书链校验失败。同版本加密库已复现
+相同的 `-188`；启用替代证书链支持后，二维码获取成功，错误域名和不可信根证书
+仍被拒绝。test5 只修正这个兼容问题，不改阅读记录、登录保存或上传规则。
+升级后版本应为 `1.6.0-time-test5`，继续在原来的书里点“同步进度”验证扫码。
