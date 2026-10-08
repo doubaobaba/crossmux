@@ -1,5 +1,11 @@
 # Native offline reading-time sync test build
 
+Release status (2026-10-08): the owner accepted the current X3 build for release
+as `weread-time-v1`. The test8 binary is promoted unchanged, including its
+embedded version string. See [release notes and known limitations](../releases/weread-time-v1.md).
+The entries below retain their original test-stage observations; they are not
+a claim that every acceptance scenario subsequently passed.
+
 Test8 base `1fcdc79be5e473f575722f9219501fc7caf465f7`; version `1.6.0-time-test8`.
 The SDK is pinned by the `freeink-sdk` gitlink; the output manifest records its exact commit.
 X3/X4 ESP32-C3 `gh_release`; original partitions and SD updater.

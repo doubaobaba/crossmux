@@ -6,6 +6,8 @@
 
 [固件发布](https://github.com/0x1abin/crossmux/releases) · [用户指南](./USER_GUIDE.md) · [参与贡献](./docs/contributing/README.md)
 
+> **本 fork 正式版：微信读书时长同步 v1** — [下载固件](https://github.com/doubaobaba/crossmux/releases/tag/weread-time-v1) · [使用方法与已知限制](./docs/releases/weread-time-v1.md)。离线阅读后点击“同步进度”上传时长，支持设备扫码登录并保存凭证。本次发布沿用已验证的 test8 固件，“关于”仍显示 `1.6.0-time-test8`。
+
 ![CrossMux 运行在 Xteink 设备上](./docs/images/cover.jpg)
 
 ## 核心功能
@@ -14,7 +16,7 @@
 - **无线功能**：浏览器传书与设置、Calibre 无线连接、OPDS 下载、WebDAV 和设备 OTA 更新。
 - **Apps 应用中心**：数独、五子棋、中国象棋、扫雷、2048、电子木鱼、Ugly Avatar 等轻量游戏与工具。[应用说明](./src/activities/apps/README.md)。
 - **AirPage**：扫码上传内容，通过手动刷新或前台实时投送显示 BMP/JPEG 图片，也可将图片设为休眠画面。[操作与联网行为](./src/activities/apps/README.md#airpage)。
-- **微信读书**：扫码登录、浏览书架、下载 EPUB 离线阅读和同步进度，在 China 内容区显示。[微信读书说明](./src/activities/apps/weread/README.md)。
+- **微信读书**：扫码登录、浏览书架、下载 EPUB 离线阅读，同步进度及离线阅读时长，在 China 内容区显示。[微信读书说明](./src/activities/apps/weread/README.md)。
 - **阅读分析与待机**：阅读统计、热力图、档案与成就，以及时钟和老黄历表盘。[阅读分析说明](./src/activities/apps/reading-stats/README.md)。
 - **语言与开发**：每个硬件目标使用包含 33 种 UI 语言的统一固件，并提供桌面模拟器辅助开发。
 

@@ -6,6 +6,8 @@
 
 [Releases](https://github.com/0x1abin/crossmux/releases) · [User guide](./USER_GUIDE.md) · [Contributing](./docs/contributing/README.md)
 
+> **Fork release: WeRead Reading Time Sync v1** — [Download firmware](https://github.com/doubaobaba/crossmux/releases/tag/weread-time-v1) · [Usage and known limitations](./docs/releases/weread-time-v1.md). Sync offline reading time through **Sync Progress**, with on-device QR login and saved credentials. This release promotes the verified test8 binary unchanged; About still shows `1.6.0-time-test8`.
+
 ![CrossMux running on an Xteink device](./docs/images/cover.jpg)
 
 ## Features
@@ -14,7 +16,7 @@
 - **Wireless workflows**: browser file transfer and settings, Calibre wireless, OPDS downloads, WebDAV, and device OTA updates.
 - **Apps**: lightweight games and tools including Sudoku, Gomoku, Chinese Chess, Minesweeper, 2048, Electronic Woodfish, and Ugly Avatar. [Apps guide](./src/activities/apps/README.md).
 - **AirPage**: scan to upload content, then display BMP/JPEG images with manual refresh or foreground live delivery; images can become a sleep screen. [Usage and network behavior](./src/activities/apps/README.md#airpage).
-- **WeRead**: QR login, bookshelf browsing, EPUB downloads for offline reading, and progress sync. Available in the China content profile. [WeRead guide (Chinese)](./src/activities/apps/weread/README.md).
+- **WeRead**: QR login, bookshelf browsing, EPUB downloads for offline reading, progress sync, and offline reading-time sync. Available in the China content profile. [WeRead guide (Chinese)](./src/activities/apps/weread/README.md).
 - **Reading analytics and standby**: reading statistics, heatmaps, profiles and achievements; clock and Chinese almanac faces. [Analytics guide](./src/activities/apps/reading-stats/README.md).
 - **Languages and development**: 33 UI languages in one firmware per hardware target, plus desktop simulators for UI development.
 
